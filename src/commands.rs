@@ -8,7 +8,7 @@ use katok::{
         rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings, CHUNKER_VERSION,
     },
     config::KatokConfig,
-    search::{bm25_search_with_snippet, keyword_search_with_snippet},
+    search::{bm25_search_scoped, keyword_search_scoped},
     semantic::semantic_search_live_with_config,
     transcript::export_transcript,
     types::SyncTimings,
@@ -30,7 +30,9 @@ pub(crate) fn command_requests_json(command: &Commands) -> bool {
         | Commands::Index { json, .. }
         | Commands::WipeIndex { json, .. }
         | Commands::Chunks { json, .. }
-        | Commands::Transcript { json, .. } => *json,
+        | Commands::Transcript { json, .. }
+        | Commands::Messages { json, .. }
+        | Commands::Rooms { json } => *json,
         Commands::Search { command } => match command {
             SearchCommand::Keyword { json, .. }
             | SearchCommand::Bm25 { json, .. }
@@ -119,6 +121,23 @@ pub(crate) fn run(
             json,
         } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
+        Commands::Messages {
+            chat,
+            since,
+            until,
+            limit,
+            me,
+            json,
+        } => run_messages(
+            &chat,
+            since.as_deref(),
+            until.as_deref(),
+            limit,
+            me.as_deref(),
+            json,
+            &archive_path,
+        ),
+        Commands::Rooms { json } => run_rooms(json, &archive_path),
         #[cfg(all(target_os = "macos", feature = "private-send"))]
         Commands::Send {
             room,
@@ -542,14 +561,36 @@ fn run_search(
 ) -> Result<()> {
     let archive = Archive::open(archive_path).context("open archive")?;
     match command {
-        SearchCommand::Keyword { query, limit, json } => {
-            let hits = keyword_search_with_snippet(&archive, &query, limit, config.snippet_length)
-                .context("keyword search")?;
+        SearchCommand::Keyword {
+            query,
+            limit,
+            chat,
+            json,
+        } => {
+            let hits = keyword_search_scoped(
+                &archive,
+                &query,
+                limit,
+                config.snippet_length,
+                chat.as_deref(),
+            )
+            .context("keyword search")?;
             print_payload(json, &hits)
         }
-        SearchCommand::Bm25 { query, limit, json } => {
-            let hits = bm25_search_with_snippet(&archive, &query, limit, config.snippet_length)
-                .context("bm25 search")?;
+        SearchCommand::Bm25 {
+            query,
+            limit,
+            chat,
+            json,
+        } => {
+            let hits = bm25_search_scoped(
+                &archive,
+                &query,
+                limit,
+                config.snippet_length,
+                chat.as_deref(),
+            )
+            .context("bm25 search")?;
             print_payload(json, &hits)
         }
         SearchCommand::Semantic { query, limit, json } => {
@@ -580,6 +621,36 @@ fn run_source(command: SourceCommand, config: &KatokConfig, data_dir: &Path) -> 
             print_payload(json, &chats)
         }
     }
+}
+
+fn run_messages(
+    chat: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+    me: Option<&str>,
+    json: bool,
+    archive_path: &Path,
+) -> Result<()> {
+    let archive = Archive::open(archive_path).context("open archive")?;
+    let messages = archive
+        .messages_for_chat_range(chat, since, until, limit, me)
+        .context("list messages")?;
+    let payload = serde_json::json!({
+        "chat_id": chat,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "count": messages.len(),
+        "messages": messages,
+    });
+    print_payload(json, &payload)
+}
+
+fn run_rooms(json: bool, archive_path: &Path) -> Result<()> {
+    let archive = Archive::open(archive_path).context("open archive")?;
+    let rooms = archive.rooms_overview().context("list rooms")?;
+    print_payload(json, &rooms)
 }
 
 fn run_chunks(chat: &str, json: bool, archive_path: &Path) -> Result<()> {

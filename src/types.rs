@@ -252,3 +252,35 @@ pub struct SearchHit {
     pub parent_chunk_ids: Vec<String>,
     pub child_chunk_ids: Vec<String>,
 }
+
+/// One archived message with the sender identity, as `katok messages` reports it.
+///
+/// Added on the talk2build branch. `is_mine` compares `sha256(sender_id)` with the archive's
+/// `account_hash`, which is how the macOS reader derives the account hash (see
+/// `kakao::reader::account_hash`), so it needs no auth cache read.
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageRow {
+    pub message_id: String,
+    pub chat_id: String,
+    pub chat_name: String,
+    pub chat_type: String,
+    pub sender_id: String,
+    pub sender_nickname: String,
+    pub is_mine: bool,
+    pub timestamp: String,
+    pub text: String,
+    pub message_type: String,
+    pub reply_to_message_id: Option<String>,
+    pub is_feed: bool,
+}
+
+/// One chat as the archive knows it, with tail metadata for cursoring and room lists.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoomOverview {
+    pub chat_id: String,
+    pub chat_name: String,
+    pub chat_type: String,
+    pub message_count: usize,
+    pub last_timestamp: Option<String>,
+    pub last_message_id: Option<String>,
+}

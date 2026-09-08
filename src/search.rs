@@ -11,6 +11,17 @@ pub fn keyword_search_with_snippet(
     limit: usize,
     snippet_length: usize,
 ) -> Result<Vec<SearchHit>> {
+    keyword_search_scoped(archive, query, limit, snippet_length, None)
+}
+
+/// Keyword search restricted to one chat when `chat_id` is given (talk2build branch).
+pub fn keyword_search_scoped(
+    archive: &Archive,
+    query: &str,
+    limit: usize,
+    snippet_length: usize,
+    chat_id: Option<&str>,
+) -> Result<Vec<SearchHit>> {
     if query.trim().is_empty() {
         return Err(Error::EmptyQuery);
     }
@@ -19,13 +30,13 @@ pub fn keyword_search_with_snippet(
         .connection()
         .prepare(
             "SELECT chunk_id FROM chunks
-         WHERE text LIKE ?1
+         WHERE text LIKE ?1 AND (?3 IS NULL OR chat_id = ?3)
          ORDER BY started_at, chunk_id
          LIMIT ?2",
         )
         .map_err(Error::Sql)?;
     let ids = stmt
-        .query_map(params![pattern, limit as i64], |row| {
+        .query_map(params![pattern, limit as i64, chat_id], |row| {
             row.get::<_, String>(0)
         })
         .map_err(Error::Sql)?
@@ -44,6 +55,17 @@ pub fn bm25_search_with_snippet(
     limit: usize,
     snippet_length: usize,
 ) -> Result<Vec<SearchHit>> {
+    bm25_search_scoped(archive, query, limit, snippet_length, None)
+}
+
+/// BM25 search restricted to one chat when `chat_id` is given (talk2build branch).
+pub fn bm25_search_scoped(
+    archive: &Archive,
+    query: &str,
+    limit: usize,
+    snippet_length: usize,
+    chat_id: Option<&str>,
+) -> Result<Vec<SearchHit>> {
     if query.trim().is_empty() {
         return Err(Error::EmptyQuery);
     }
@@ -54,13 +76,13 @@ pub fn bm25_search_with_snippet(
             "SELECT c.chunk_id, bm25(chunks_fts) AS rank
          FROM chunks_fts
          JOIN chunks c ON c.rowid = chunks_fts.rowid
-         WHERE chunks_fts MATCH ?1
+         WHERE chunks_fts MATCH ?1 AND (?3 IS NULL OR c.chat_id = ?3)
          ORDER BY rank
          LIMIT ?2",
         )
         .map_err(Error::Sql)?;
     let ids = stmt
-        .query_map(params![fts_query, limit as i64], |row| {
+        .query_map(params![fts_query, limit as i64, chat_id], |row| {
             row.get::<_, String>(0)
         })
         .map_err(Error::Sql)?

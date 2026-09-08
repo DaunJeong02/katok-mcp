@@ -103,6 +103,35 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// List one chat's archived messages as JSON with sender identity (talk2build branch).
+    ///
+    /// Reads the archive, not the live KakaoTalk database. Returns the newest `--limit` rows
+    /// inside the optional `--since` / `--until` RFC3339 range, ordered oldest first, so a
+    /// caller can page a mirror view or read a delta after a cursor.
+    Messages {
+        /// chat_id as reported by `rooms` or `source chats`.
+        #[arg(long)]
+        chat: String,
+        /// Only include messages at or after this RFC3339 timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Only include messages at or before this RFC3339 timestamp.
+        #[arg(long)]
+        until: Option<String>,
+        /// Maximum rows, taken from the newest end of the range.
+        #[arg(long, default_value_t = 500, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
+        limit: usize,
+        /// Force which sender_id counts as "me" (synthetic fixtures carry no account hash).
+        #[arg(long)]
+        me: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List every chat in the archive with message count and newest message (talk2build branch).
+    Rooms {
+        #[arg(long)]
+        json: bool,
+    },
     /// Send, stage, or inspect a KakaoTalk chat through its macOS UI.
     ///
     /// Unlike every other subcommand this writes rather than reads, and it does so by driving
@@ -183,6 +212,9 @@ pub(crate) enum SearchCommand {
         /// Maximum number of results to return.
         #[arg(long, default_value_t = 10, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
+        /// Restrict hits to one chat_id (talk2build branch).
+        #[arg(long)]
+        chat: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -191,6 +223,9 @@ pub(crate) enum SearchCommand {
         /// Maximum number of results to return.
         #[arg(long, default_value_t = 10, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
+        /// Restrict hits to one chat_id (talk2build branch).
+        #[arg(long)]
+        chat: Option<String>,
         #[arg(long)]
         json: bool,
     },

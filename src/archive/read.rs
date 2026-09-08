@@ -1,6 +1,6 @@
 use super::{Archive, StoredMessage};
 use crate::{
-    types::{Chunk, ChunkSummary},
+    types::{Chunk, ChunkSummary, MessageRow, RoomOverview},
     Error, Result,
 };
 use rusqlite::{params, OptionalExtension};
@@ -314,6 +314,96 @@ impl Archive {
         Ok(rows)
     }
 
+    /// Messages of one chat inside `[since, until]`, newest `limit` rows, returned oldest first.
+    ///
+    /// Added on the talk2build branch for the mirror viewer and the poll cursor. `me_override`
+    /// forces the `is_mine` sender id (synthetic fixtures do not carry a sha256 account hash).
+    pub fn messages_for_chat_range(
+        &self,
+        chat_id: &str,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+        me_override: Option<&str>,
+    ) -> Result<Vec<MessageRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id, sender_id,
+                        sender_nickname, timestamp, text, message_type, reply_to_message_id
+                 FROM messages
+                 WHERE chat_id = ?1
+                   AND timestamp >= COALESCE(?2, '')
+                   AND (?3 IS NULL OR timestamp <= ?3)
+                 ORDER BY timestamp DESC, message_id DESC
+                 LIMIT ?4",
+            )
+            .map_err(Error::Sql)?;
+        let mut rows = stmt
+            .query_map(params![chat_id, since, until, limit as i64], |row| {
+                let account_hash: String = row.get(0)?;
+                let sender_id: String = row.get(5)?;
+                let message_type: String = row.get(9)?;
+                let text: String = row.get(8)?;
+                let is_mine = match me_override {
+                    Some(me) => me == sender_id,
+                    None => sender_account_hash(&sender_id) == account_hash,
+                };
+                let is_feed = crate::transcript::is_feed(&message_type, &text);
+                Ok(MessageRow {
+                    message_id: row.get(4)?,
+                    chat_id: row.get(1)?,
+                    chat_name: row.get(2)?,
+                    chat_type: row.get(3)?,
+                    sender_id,
+                    sender_nickname: row.get(6)?,
+                    is_mine,
+                    timestamp: row.get(7)?,
+                    text,
+                    message_type,
+                    reply_to_message_id: row.get(10)?,
+                    is_feed,
+                })
+            })
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// Every chat in the archive with its message count and newest message key.
+    pub fn rooms_overview(&self) -> Result<Vec<RoomOverview>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT c.chat_id, c.chat_name, c.chat_type,
+                        (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.chat_id),
+                        (SELECT m.timestamp FROM messages m WHERE m.chat_id = c.chat_id
+                           ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1),
+                        (SELECT m.message_id FROM messages m WHERE m.chat_id = c.chat_id
+                           ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1)
+                 FROM chats c
+                 ORDER BY 5 DESC NULLS LAST, c.chat_name",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(RoomOverview {
+                    chat_id: row.get(0)?,
+                    chat_name: row.get(1)?,
+                    chat_type: row.get(2)?,
+                    message_count: row.get::<_, i64>(3)? as usize,
+                    last_timestamp: row.get(4)?,
+                    last_message_id: row.get(5)?,
+                })
+            })
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
     fn chunk_messages(&self, chunk_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -342,4 +432,15 @@ impl Archive {
             .map_err(Error::Sql)?;
         Ok(rows)
     }
+}
+
+/// Mirrors `kakao::reader::account_hash`: lowercase hex sha256 of the decimal sender id.
+fn sender_account_hash(sender_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(sender_id.as_bytes());
+    let mut out = String::with_capacity(64);
+    for byte in digest.iter() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
