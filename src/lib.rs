@@ -18,6 +18,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("SQLite error: {0}")]
     Sql(#[from] rusqlite::Error),
+    #[error("KATOK_ARCHIVE_KEY must be 64 hex characters")]
+    InvalidArchiveKey,
+    #[error("archive at {0} is encrypted; set KATOK_ARCHIVE_KEY")]
+    ArchiveKeyRequired(std::path::PathBuf),
     #[error("fixture parse error on line {line}: {source}")]
     Fixture {
         line: usize,

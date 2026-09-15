@@ -136,6 +136,13 @@ pub async fn index_semantic_live_for_parents(
     save_cursor(&staging, &revision, embedder.id(), embedded_texts)?;
     validate_generation(archive, &staging, embedder.id(), config.vector_dimension)?;
 
+    // In keyed (private) mode the staged markdown copies of the chat text are only an
+    // intermediate: the vectors are stored and validated, so the plaintext is removed before
+    // the generation is published. Earlier generations are scrubbed the same way.
+    if crate::paths::archive_key()?.is_some() {
+        remove_staged_documents(&staging);
+        scrub_published_documents(root);
+    }
     let generation = root.join(GENERATIONS_DIR).join(&generation_id);
     std::fs::rename(&staging, &generation).map_err(Error::Io)?;
     staging_guard.disarm();
@@ -369,6 +376,20 @@ fn publish_current(root: &Path, generation_id: &str) -> Result<()> {
     let temporary = root.join(format!(".{CURRENT_FILE}.{}", std::process::id()));
     std::fs::write(&temporary, format!("{generation_id}\n")).map_err(Error::Io)?;
     std::fs::rename(&temporary, root.join(CURRENT_FILE)).map_err(Error::Io)
+}
+
+fn remove_staged_documents(generation: &Path) {
+    let _ = std::fs::remove_dir_all(generation.join("source"));
+}
+
+fn scrub_published_documents(root: &Path) {
+    let generations = root.join(GENERATIONS_DIR);
+    let Ok(entries) = std::fs::read_dir(&generations) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        remove_staged_documents(&entry.path());
+    }
 }
 
 fn cleanup_old_generations(root: &Path, current: &str) -> Vec<String> {

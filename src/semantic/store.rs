@@ -34,6 +34,7 @@ impl LocalVectorStore {
         crate::paths::ensure_private_dir(dir)?;
         let path = dir.join("vectors.sqlite3");
         let conn = Connection::open(&path).map_err(Error::Sql)?;
+        apply_key(&conn)?;
         ensure_private_file(&path)?;
         migrate(&conn)?;
         Ok(Self { conn, dimension })
@@ -48,6 +49,11 @@ impl LocalVectorStore {
             )));
         }
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(Error::Sql)?;
+        apply_key(&conn)?;
+        // A plaintext generation left over from before the key was set reads as "not a
+        // database"; the caller treats that as stale and rebuilds the index.
+        conn.execute_batch("SELECT count(*) FROM sqlite_master;")
             .map_err(Error::Sql)?;
         Ok(Self { conn, dimension })
     }
@@ -180,12 +186,15 @@ impl LocalVectorStore {
 }
 
 fn ensure_private_file(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(path).map_err(Error::Io)?.permissions();
-        permissions.set_mode(0o600);
-        std::fs::set_permissions(path, permissions).map_err(Error::Io)?;
+    crate::paths::ensure_private_file(path)
+}
+
+/// Same key as the archive, so vectors (which embed chat text) are never plaintext when the
+/// archive is not.
+fn apply_key(conn: &Connection) -> Result<()> {
+    if let Some(key) = crate::paths::archive_key()? {
+        conn.execute_batch(&crate::paths::key_pragma(&key))
+            .map_err(Error::Sql)?;
     }
     Ok(())
 }
