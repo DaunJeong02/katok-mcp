@@ -50,9 +50,10 @@ pub fn encrypt_in_place(path: &Path, key: &str) -> Result<()> {
         let target_sql = target.to_string_lossy().replace('\'', "''");
         plain
             .execute_batch(&format!(
-                "ATTACH DATABASE '{target_sql}' AS encrypted KEY \"x'{key}'\";\n\
+                "ATTACH DATABASE '{target_sql}' AS encrypted KEY {};\n\
                  SELECT sqlcipher_export('encrypted');\n\
-                 DETACH DATABASE encrypted;"
+                 DETACH DATABASE encrypted;",
+                crate::paths::key_literal(key)
             ))
             .map_err(Error::Sql)?;
     }
@@ -74,7 +75,11 @@ impl Archive {
         let key = crate::paths::archive_key()?;
         if let Some(key) = key.as_deref() {
             if is_plaintext_sqlite(path)? {
-                encrypt_in_place(path, key)?;
+                let _lock = crate::paths::MigrationLock::acquire(path)?;
+                // Another process may have finished the conversion while we waited.
+                if is_plaintext_sqlite(path)? {
+                    encrypt_in_place(path, key)?;
+                }
             }
         }
         let conn = Connection::open(path).map_err(Error::Sql)?;

@@ -84,6 +84,65 @@ fn plaintext_archive_is_migrated_in_place_when_a_key_appears() {
 }
 
 #[test]
+fn a_non_hex_key_like_the_demo_harness_uses_works_as_a_passphrase() {
+    let _guard = LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.sqlite3");
+    let demo = "demo0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
+    with_key(Some(demo), || {
+        let archive = Archive::open(&path).unwrap();
+        archive
+            .connection()
+            .execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (3);")
+            .unwrap();
+    });
+    assert!(!header_is_plaintext(&path));
+    with_key(Some(demo), || {
+        let archive = Archive::open(&path).unwrap();
+        let n: i64 = archive
+            .connection()
+            .query_row("SELECT x FROM probe", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
+    });
+    assert!(with_key(Some(KEY), || Archive::open(&path).map(|_| ())).is_err());
+}
+
+#[test]
+fn concurrent_openers_convert_a_plaintext_archive_once() {
+    let _guard = LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.sqlite3");
+    with_key(None, || {
+        let archive = Archive::open(&path).unwrap();
+        archive
+            .connection()
+            .execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (9);")
+            .unwrap();
+    });
+    std::env::set_var(katok::paths::ARCHIVE_KEY_ENV, KEY);
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let archive = Archive::open(&path).unwrap();
+                let n: i64 = archive
+                    .connection()
+                    .query_row("SELECT x FROM probe", [], |r| r.get(0))
+                    .unwrap();
+                n
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().unwrap(), 9);
+    }
+    std::env::remove_var(katok::paths::ARCHIVE_KEY_ENV);
+    assert!(!header_is_plaintext(&path));
+    assert!(!dir.path().join("archive.sqlite3.encrypting").exists());
+}
+
+#[test]
 fn malformed_key_is_rejected_before_touching_the_file() {
     let _guard = LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();

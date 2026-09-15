@@ -18,7 +18,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("SQLite error: {0}")]
     Sql(#[from] rusqlite::Error),
-    #[error("KATOK_ARCHIVE_KEY must be 64 hex characters")]
+    #[error("KATOK_ARCHIVE_KEY must be at least 16 characters of [A-Za-z0-9_-]")]
     InvalidArchiveKey,
     #[error("archive at {0} is encrypted; set KATOK_ARCHIVE_KEY")]
     ArchiveKeyRequired(std::path::PathBuf),
