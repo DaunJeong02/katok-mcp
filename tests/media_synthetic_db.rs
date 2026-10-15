@@ -13,10 +13,11 @@ use katok::kakao::{
     auth, derive,
     media_paths::{
         album_full_stem, album_thumb_stem, chat_media_dir_name, photo_full_stem, photo_thumb_stem,
-        MediaDirs,
+        video_full_stem, MediaDirs,
     },
     media_resolver::{
-        resolve_media_frames_with_fetcher, MediaKind, MediaRecord, MediaResolveOptions, MediaTier,
+        resolve_media_frames_with_fetcher, MediaFrameInput, MediaKind, MediaRecord,
+        MediaResolveOptions, MediaTier,
     },
     read_media_frames_with_options, AuthOptions, MediaQuery,
 };
@@ -668,4 +669,139 @@ fn dry_run_previews_the_fetch_without_writing_or_requesting() {
     assert_eq!(record(&report, LOG_FILE_EXPIRED, 0).tier, MediaTier::Stub);
     assert_eq!(record(&report, LOG_FILE_HUGE, 0).tier, MediaTier::Stub);
     assert!(!fixture.output_dir.exists(), "a dry run writes nothing");
+}
+
+/// One ISO-BMFF box with a 32-bit size header.
+fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+fn complete_mp4() -> Vec<u8> {
+    [
+        mp4_box(b"ftyp", b"isom\x00\x00\x02\x00"),
+        mp4_box(b"mdat", &[7; 64]),
+        mp4_box(b"moov", &[1; 16]),
+    ]
+    .concat()
+}
+
+/// A download cut off before the index: the sample data is there, `moov` is not.
+fn incomplete_mp4() -> Vec<u8> {
+    [
+        mp4_box(b"ftyp", b"isom\x00\x00\x02\x00"),
+        mp4_box(b"mdat", &[7; 64]),
+    ]
+    .concat()
+}
+
+const LOG_VIDEO: i64 = 20_001;
+
+fn video_frame(cdn_url: Option<&str>, checksum: &[u8]) -> MediaFrameInput {
+    MediaFrameInput {
+        kind: MediaKind::Video,
+        log_id: LOG_VIDEO,
+        idx: 0,
+        width: Some(640),
+        height: Some(360),
+        checksum_sha1: Some(sha1_hex(checksum)),
+        size_bytes: None,
+        filename: None,
+        full_stem: video_full_stem(LOG_VIDEO),
+        full_ext: ".vid",
+        thumb_stem: photo_thumb_stem(LOG_VIDEO),
+        output_stem: LOG_VIDEO.to_string(),
+        sender: None,
+        sent_at: Some(1_700_000_100),
+        cdn_url: cdn_url.map(str::to_string),
+    }
+}
+
+fn video_fixture(full: &[u8]) -> (tempfile::TempDir, MediaDirs, PathBuf) {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let account = tmp.path().join(MEDIA_ACCOUNT);
+    write_cached_media(
+        &account,
+        LOG_VIDEO,
+        &video_full_stem(LOG_VIDEO),
+        ".vid",
+        full,
+        5,
+    );
+    write_cached_media(
+        &account,
+        LOG_VIDEO,
+        &photo_thumb_stem(LOG_VIDEO),
+        ".thm",
+        THUMB_IMAGE,
+        6,
+    );
+    let output_dir = tmp.path().join("out");
+    let dirs = MediaDirs::from_roots_for_test(vec![account]);
+    (tmp, dirs, output_dir)
+}
+
+#[test]
+fn complete_cached_video_resolves_full() {
+    let (_tmp, dirs, out) = video_fixture(&complete_mp4());
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &[video_frame(None, &complete_mp4())],
+        &dirs,
+        &resolve_options(out),
+        |_, _, _| panic!("cdn must not be called for a complete cached video"),
+    )
+    .expect("resolve");
+    let record = &report.records[0];
+    assert_eq!(record.tier, MediaTier::Full);
+    assert_eq!(record.tier_reason, "decrypted");
+    assert!(record
+        .path
+        .as_ref()
+        .is_some_and(|path| path.extension().is_some_and(|ext| ext == "mp4")));
+}
+
+#[test]
+fn incomplete_cached_video_falls_back_to_the_thumbnail_without_writing_it() {
+    let (_tmp, dirs, out) = video_fixture(&incomplete_mp4());
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &[video_frame(None, &complete_mp4())],
+        &dirs,
+        &resolve_options(out.clone()),
+        |_, _, _| panic!("no cdn url, so no fetch"),
+    )
+    .expect("resolve");
+    let record = &report.records[0];
+    assert_eq!(record.tier, MediaTier::Thumb);
+    assert_eq!(record.tier_reason, "full-incomplete");
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].stage, "full");
+    assert!(report.errors[0].error.contains("moov"));
+    // The partial video must not be left where `skip_existing` would take it
+    // for a finished output.
+    assert!(!out.join(format!("{LOG_VIDEO}.mp4")).exists());
+}
+
+#[test]
+fn incomplete_cached_video_is_replaced_from_the_cdn() {
+    let (_tmp, dirs, out) = video_fixture(&incomplete_mp4());
+    let url = "https://cdn.example/video.mp4?expires=1900000000";
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &[video_frame(Some(url), &complete_mp4())],
+        &dirs,
+        &resolve_options(out),
+        |_, _, _| Ok(complete_mp4()),
+    )
+    .expect("resolve");
+    let record = &report.records[0];
+    assert_eq!(record.tier, MediaTier::Cdn);
+    assert_eq!(record.tier_reason, "full-incomplete+cdn-fetched");
+    assert_eq!(
+        std::fs::read(record.path.as_ref().expect("cdn path")).expect("cdn body"),
+        complete_mp4()
+    );
 }

@@ -382,6 +382,65 @@ pub fn image_ext(body: &[u8]) -> &'static str {
     }
 }
 
+/// Whether an ISO-BMFF (MP4) body carries a complete top-level `moov` box.
+///
+/// KakaoTalk writes a video into its cache as it streams in, so a `.vid` that
+/// decrypts cleanly can still be a partial download: the sample data is there
+/// but the index that makes it playable is not. Players refuse such a file, so
+/// it must not be reported as the full-quality tier.
+///
+/// Walks the top-level box headers only (size + type), never box contents.
+/// A box whose declared size runs past the end of the body is a truncation and
+/// stops the walk, so a `moov` that is cut off does not count as present.
+pub(crate) fn mp4_has_complete_moov(body: &[u8]) -> bool {
+    let len = body.len() as u64;
+    let mut offset: u64 = 0;
+    while offset < len {
+        let start = offset as usize;
+        let Some(header) = body.get(start..start + 8) else {
+            return false; // a partial box header: truncated
+        };
+        let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let kind = &header[4..8];
+        let (size, header_len) = match size32 {
+            // Runs to the end of the body; by definition the last box.
+            0 => (len - offset, 8),
+            // 64-bit `largesize` follows the type.
+            1 => {
+                let Some(large) = body.get(start + 8..start + 16) else {
+                    return false;
+                };
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(large);
+                (u64::from_be_bytes(bytes), 16)
+            }
+            n => (u64::from(n), 8),
+        };
+        if size < header_len {
+            return false; // malformed: a box cannot be smaller than its header
+        }
+        let Some(end) = offset.checked_add(size) else {
+            return false;
+        };
+        if end > len {
+            return false; // declared past the end of the body: truncated
+        }
+        if kind == b"moov" {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+
+/// Whether a decrypted full-tier body is safe to report as `full`.
+///
+/// Only an MP4 video is checked: a photo has no equivalent index to lose, and a
+/// non-MP4 video container is left as it was rather than guessed at.
+fn full_body_is_complete(kind: MediaKind, body: &[u8]) -> bool {
+    kind != MediaKind::Video || image_ext(body) != ".mp4" || mp4_has_complete_moov(body)
+}
+
 fn resolve_one<F>(
     chat_id: i64,
     frame: &MediaFrameInput,
@@ -417,6 +476,23 @@ where
         let full = media_dirs.find_media_file(chat_id, &frame.full_stem, frame.full_ext);
         if let Some(full_path) = full {
             match read_and_decrypt(&full_path, frame.log_id) {
+                // A partially downloaded video decrypts fine but cannot play.
+                // Nothing is written for it, so a later run with
+                // `skip_existing` does not mistake it for a finished output,
+                // and the CDN and thumbnail tiers below get their turn.
+                Ok(body) if !full_body_is_complete(frame.kind, &body) => {
+                    why.push("full-incomplete".to_string());
+                    errors.push(error_record(
+                        frame,
+                        "full",
+                        &full_path.display().to_string(),
+                        Error::Kakao(
+                            "decrypted video has no complete top-level moov box; the cached \
+                             file is an incomplete download"
+                                .to_string(),
+                        ),
+                    ));
+                }
                 Ok(body) => {
                     let out = options.output_dir.join(format!(
                         "{}{}",
@@ -548,6 +624,9 @@ where
 
     let stub_head = if thumb_failed || why.iter().any(|item| item == "full-decrypt-failed") {
         "decrypt-failed"
+    } else if why.iter().any(|item| item == "full-incomplete") {
+        // The full file was there, so "not-cached" would be untrue.
+        "incomplete"
     } else if frame.kind.has_local_cache() {
         "not-cached"
     } else {
@@ -558,7 +637,11 @@ where
     let mut detail: Vec<&str> = why
         .iter()
         .map(String::as_str)
-        .filter(|item| *item != "full-not-cached" && *item != "full-decrypt-failed")
+        .filter(|item| {
+            *item != "full-not-cached"
+                && *item != "full-decrypt-failed"
+                && *item != "full-incomplete"
+        })
         .collect();
     if thumb_failed {
         detail.push("thumb-decrypt-failed");
@@ -1042,6 +1125,108 @@ mod tests {
         // Truncation is on a char boundary, so the result is still valid UTF-8
         // and short enough for the filesystem.
         assert!(out.len() <= 120 + ".zip".len());
+    }
+
+    /// One ISO-BMFF box with a 32-bit size header.
+    fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn ftyp() -> Vec<u8> {
+        mp4_box(b"ftyp", b"isom\x00\x00\x02\x00")
+    }
+
+    #[test]
+    fn mp4_with_ftyp_and_moov_is_complete() {
+        // moov after mdat (no faststart) and moov first (faststart) both count.
+        let tail_moov = [
+            ftyp(),
+            mp4_box(b"mdat", &[7; 64]),
+            mp4_box(b"moov", &[1; 16]),
+        ]
+        .concat();
+        assert!(mp4_has_complete_moov(&tail_moov));
+        let head_moov = [
+            ftyp(),
+            mp4_box(b"moov", &[1; 16]),
+            mp4_box(b"mdat", &[7; 64]),
+        ]
+        .concat();
+        assert!(mp4_has_complete_moov(&head_moov));
+    }
+
+    #[test]
+    fn mp4_without_moov_is_incomplete() {
+        let body = [ftyp(), mp4_box(b"mdat", &[7; 64])].concat();
+        assert!(!mp4_has_complete_moov(&body));
+        assert!(!mp4_has_complete_moov(&ftyp()));
+        assert!(!mp4_has_complete_moov(&[]));
+        assert!(!mp4_has_complete_moov(b"junk"));
+    }
+
+    #[test]
+    fn truncated_mp4_is_incomplete() {
+        // The moov header is there but its body is cut off.
+        let mut cut = [ftyp(), mp4_box(b"moov", &[1; 32])].concat();
+        cut.truncate(cut.len() - 10);
+        assert!(!mp4_has_complete_moov(&cut));
+        // mdat declares more bytes than arrived, so the moov behind it never did.
+        let mut short_mdat = ftyp();
+        short_mdat.extend_from_slice(&1000u32.to_be_bytes());
+        short_mdat.extend_from_slice(b"mdat");
+        short_mdat.extend_from_slice(&[7; 64]);
+        assert!(!mp4_has_complete_moov(&short_mdat));
+        // A partial box header at the end is a truncation too.
+        let partial_header = [ftyp(), vec![0, 0, 0]].concat();
+        assert!(!mp4_has_complete_moov(&partial_header));
+        // A box smaller than its own header is malformed, not a loop.
+        let malformed = [ftyp(), vec![0, 0, 0, 4], b"moov".to_vec()].concat();
+        assert!(!mp4_has_complete_moov(&malformed));
+    }
+
+    #[test]
+    fn mp4_box_sizes_handle_largesize_and_to_end() {
+        // size == 1: a 64-bit largesize follows the type.
+        let mut large = ftyp();
+        large.extend_from_slice(&1u32.to_be_bytes());
+        large.extend_from_slice(b"mdat");
+        large.extend_from_slice(&(16u64 + 8).to_be_bytes());
+        large.extend_from_slice(&[7; 8]);
+        large.extend_from_slice(&mp4_box(b"moov", &[1; 4]));
+        assert!(mp4_has_complete_moov(&large));
+        // A largesize past the end is still a truncation.
+        let mut large_cut = ftyp();
+        large_cut.extend_from_slice(&1u32.to_be_bytes());
+        large_cut.extend_from_slice(b"moov");
+        large_cut.extend_from_slice(&(1u64 << 40).to_be_bytes());
+        assert!(!mp4_has_complete_moov(&large_cut));
+        // size == 0: the box runs to the end of the body.
+        let mut to_end = ftyp();
+        to_end.extend_from_slice(&0u32.to_be_bytes());
+        to_end.extend_from_slice(b"moov");
+        to_end.extend_from_slice(&[1; 20]);
+        assert!(mp4_has_complete_moov(&to_end));
+        let mut mdat_to_end = ftyp();
+        mdat_to_end.extend_from_slice(&0u32.to_be_bytes());
+        mdat_to_end.extend_from_slice(b"mdat");
+        mdat_to_end.extend_from_slice(&[7; 20]);
+        assert!(!mp4_has_complete_moov(&mdat_to_end));
+    }
+
+    #[test]
+    fn only_mp4_videos_are_held_to_the_moov_check() {
+        let no_moov = [ftyp(), mp4_box(b"mdat", &[7; 64])].concat();
+        assert!(!full_body_is_complete(MediaKind::Video, &no_moov));
+        // A photo is never demoted, whatever its bytes look like.
+        assert!(full_body_is_complete(MediaKind::Photo, &no_moov));
+        // A non-MP4 video container is left alone.
+        assert!(full_body_is_complete(
+            MediaKind::Video,
+            &[0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]
+        ));
     }
 
     #[test]
