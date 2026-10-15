@@ -1538,6 +1538,11 @@ fn open_room_via_search(
     // Verified rather than fire-and-forget: whatever ends up in this box is what
     // decides which conversation gets opened.
     let query = search_query_for(&target.name);
+    // The query is typed as global keystrokes, and those go to KakaoTalk's key
+    // window. With a chat window key they would land in that room's compose box,
+    // so the chat list is raised first and the keystrokes are only posted once it
+    // is confirmed to be the focused window.
+    raise_window(main);
     // Focus first: typing goes wherever the app thinks focus is.
     let focus_key = CFString::new(ATTR_FOCUSED);
     let yes = core_foundation::boolean::CFBoolean::true_value();
@@ -1559,7 +1564,16 @@ fn open_room_via_search(
             empty.as_CFTypeRef(),
         )
     };
-    front_then(pid, || type_text(&query))??;
+    front_then(pid, || {
+        let focused = focused_window(pid);
+        if !keystroke_may_post(main, focused.as_ref()) {
+            return Err(SendError::WindowFocusLost {
+                expected: window_label(Some(main)),
+                actual: window_label(focused.as_ref()),
+            });
+        }
+        type_text(&query)
+    })??;
     // Prove the field ended up holding the query; if the keystrokes went
     // somewhere else this says so instead of silently filtering nothing.
     let mut landed = false;

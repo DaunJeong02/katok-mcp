@@ -10,6 +10,9 @@
   keystroke. Activating the app alone left the paste to whichever window was
   key last, so with several chats open it could land in another room. A
   mismatch fails with `WindowFocusLost` and posts nothing.
+- Opening a closed room by chat-list search now raises the chat list and
+  types the query only once it is KakaoTalk's focused window. With a chat
+  window key, the query could go into that room's compose box.
 
 ### Reading
 
