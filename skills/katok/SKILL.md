@@ -104,6 +104,7 @@ Sync is cheap enough to run often because only chats whose messages changed have
 ## Field Notes
 
 - Most group rooms come back as a `chat-<id>` placeholder rather than a real title, because the source database does not always carry the room name. Grepping room names will not find them.
+- `chat_type` is `direct`, `group`, or `self`. `self` is the memo chat whose only member is the account owner (나와의 채팅). It is named after the owner's own nickname, because that is the title KakaoTalk gives its window and the name `send --chat` matches against.
 - To locate a room whose title is a placeholder, search for a term used inside it and group the hits by `chat_name`. The `chat_id` holding the most hits is that room. Each hit carries `chunk_id`, `chat_name`, `sender_nickname`, `started_at`, and `snippet`.
 - `katok chunks --chat <chat-id>` returns chunk metadata only, never `text`. To export a whole room, collect the chunk ids and run `katok chunk get` per chunk, then assemble in timestamp order.
 - `katok chunk get --redact` masks the entire `text`, not only the PII inside it. Use it for a line you must quote, not for a readable export.

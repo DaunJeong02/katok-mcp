@@ -128,6 +128,9 @@ pub(crate) enum Commands {
         json: bool,
     },
     /// List every chat in the archive with message count and newest message (talk2build branch).
+    ///
+    /// `chat_type` is `direct`, `group`, or `self` (the memo chat whose only member is you,
+    /// named after your own nickname as KakaoTalk titles its window).
     Rooms {
         #[arg(long)]
         json: bool,

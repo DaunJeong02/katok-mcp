@@ -433,6 +433,81 @@ fn reconstructs_names_for_unnamed_rooms() {
     assert_eq!(group_msg.chat_name, "Alice, BobNick");
 }
 
+/// The memo room whose only member is the account owner ("나와의 채팅") has no
+/// `chatName`, no peer and no display members, so it used to come out as a
+/// `chat-<id>` group. KakaoTalk titles its window with the owner's nickname, and
+/// `send --chat` finds windows by the archived name, so it must be stored under
+/// that nickname and typed `self`. A group everyone else has left has the same
+/// member shape and must stay an unnamed group.
+#[test]
+fn names_the_self_chat_after_the_owner() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = open_with_schema(&db_path, &key);
+    conn.execute(
+        "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
+         VALUES (?1, 0, NULL, NULL, 'Me Display')",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert users");
+    // Room 700: the self chat (type 5, one active member, no peer).
+    // Room 800: an ordinary group that everyone else has left.
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (700, 0, 5, NULL, 1, 0, NULL),
+                (800, 0, 1, NULL, 1, 0, NULL)",
+        [],
+    )
+    .expect("insert rooms");
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (700, 70, 1, ?1, 1, NULL, 'note to self', 1700000000),
+                (800, 80, 2, ?1, 1, NULL, 'anyone here', 1700000100)",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert messages");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    let chat = |id: &str| {
+        output
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == id)
+            .unwrap_or_else(|| panic!("missing chat {id}"))
+            .clone()
+    };
+    assert_eq!(chat("700").chat_type, "self");
+    assert_eq!(chat("700").chat_name, "Me Display");
+    assert_eq!(chat("800").chat_type, "group");
+    assert_eq!(chat("800").chat_name, "chat-800");
+
+    let self_msg = output
+        .messages
+        .iter()
+        .find(|message| message.chat_id == "700")
+        .expect("self-chat message");
+    assert_eq!(self_msg.chat_type, "self");
+    assert_eq!(self_msg.chat_name, "Me Display");
+}
+
 /// An older KakaoTalk schema without an `NTChatMeta` table and without the
 /// `NTChatRoom.displayMemberIds` column must still read: the best-effort title
 /// and member enrichment skip cleanly, and an unnamed room keeps `chat-<id>`.

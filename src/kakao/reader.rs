@@ -101,8 +101,26 @@ fn account_hash(user_id: i64) -> String {
     out
 }
 
+/// `NTChatRoom.type` of the account's own memo chat ("나와의 채팅").
+const SELF_CHAT_ROOM_TYPE: i64 = 5;
+
+/// Whether a room is the account's self chat: the memo room whose only member
+/// is the account owner.
+///
+/// The room type is what identifies it. Member counts alone are not enough: a
+/// group everyone else has left also has one active member and no display
+/// members, and calling that a self chat would rename it after the owner and
+/// make `send --chat` aim at the owner's memo window instead. The member
+/// columns are still checked so an unexpected reuse of the type value by
+/// KakaoTalk does not silently relabel a real conversation.
+fn is_self_room(room_type: i64, direct_member: i64, active_members: i64) -> bool {
+    room_type == SELF_CHAT_ROOM_TYPE && direct_member == 0 && active_members <= 1
+}
+
 fn classify_room(room_type: i64, direct_member: i64, active_members: i64) -> String {
-    if room_type == 0 || room_type == 2 || direct_member > 0 || active_members == 2 {
+    if is_self_room(room_type, direct_member, active_members) {
+        "self".to_string()
+    } else if room_type == 0 || room_type == 2 || direct_member > 0 || active_members == 2 {
         "direct".to_string()
     } else {
         "group".to_string()
@@ -233,8 +251,8 @@ fn enrich_display_members(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>)
 
 /// Resolve a human-readable chat name, falling back in order: an explicit
 /// `chatName` → the user-set custom title → the direct peer's nickname (1:1
-/// chats) → joined display-member nicknames (group chats) → the `chat-<id>`
-/// placeholder. KakaoTalk leaves `chatName` empty for auto-titled rooms and
+/// chats) → the account owner's own nickname (the self chat only) → joined
+/// display-member nicknames (group chats) → the `chat-<id>` placeholder. KakaoTalk leaves `chatName` empty for auto-titled rooms and
 /// composes the shown name from a title meta or from members at render time;
 /// this mirrors that from the same DB, adding no logs.
 fn resolve_chat_name(
@@ -260,9 +278,18 @@ fn resolve_chat_name(
             return link_name.clone();
         }
         // Direct chat: the peer's nickname. Never the account owner itself
-        // (a self-chat / anomalous room must fall through, not take our name).
+        // (an anomalous room must fall through, not take our name).
         if meta.direct_member_id != 0 && meta.direct_member_id != self_user_id {
             if let Some(name) = users.get(&meta.direct_member_id) {
+                return name.clone();
+            }
+        }
+        // The self chat is the one room that *does* take the owner's name:
+        // KakaoTalk titles its window with the owner's nickname, and `send
+        // --chat` finds a window by the archived name. Only a room positively
+        // classified as the self chat gets here.
+        if meta.chat_type == "self" {
+            if let Some(name) = users.get(&self_user_id) {
                 return name.clone();
             }
         }
@@ -599,6 +626,51 @@ mod tests {
         assert_eq!(classify_room(1, 999, 5), "direct"); // directChatMemberUserId > 0
         assert_eq!(classify_room(1, 0, 5), "group");
         assert_eq!(classify_room(4, 0, 100), "group");
+    }
+
+    #[test]
+    fn classifies_the_memo_room_as_self() {
+        assert_eq!(classify_room(SELF_CHAT_ROOM_TYPE, 0, 1), "self");
+        assert_eq!(classify_room(SELF_CHAT_ROOM_TYPE, 0, 0), "self");
+    }
+
+    #[test]
+    fn a_group_everyone_else_left_is_not_the_self_chat() {
+        // Same member shape as the self chat, ordinary group type.
+        assert_eq!(classify_room(1, 0, 1), "group");
+        // The self-chat type with a peer or several members is not trusted.
+        assert!(!is_self_room(SELF_CHAT_ROOM_TYPE, 999, 1));
+        assert!(!is_self_room(SELF_CHAT_ROOM_TYPE, 0, 3));
+    }
+
+    fn room(chat_type: &str) -> RoomMeta {
+        RoomMeta {
+            name: None,
+            chat_type: chat_type.to_string(),
+            title: None,
+            direct_member_id: 0,
+            display_member_ids: Vec::new(),
+            open_link_name: None,
+        }
+    }
+
+    #[test]
+    fn the_self_chat_is_named_after_the_owner() {
+        let users = HashMap::from([(7_i64, "Owner Nick".to_string())]);
+        assert_eq!(
+            resolve_chat_name(Some(&room("self")), 42, 7, &users),
+            "Owner Nick"
+        );
+        // Any other room with no members never takes the owner's name.
+        assert_eq!(
+            resolve_chat_name(Some(&room("group")), 42, 7, &users),
+            "chat-42"
+        );
+        // An owner with no NTUser row keeps the placeholder rather than guessing.
+        assert_eq!(
+            resolve_chat_name(Some(&room("self")), 42, 8, &users),
+            "chat-42"
+        );
     }
 
     #[test]
