@@ -30,7 +30,9 @@
 //! - **Never post a global key on faith.** A global key event goes to whatever is frontmost. If
 //!   the user clicks away between activating KakaoTalk and posting Cmd+V, the image lands in
 //!   *their* document. So frontmost is verified immediately before every global post, and the
-//!   post is abandoned rather than fired blind. A failed send is recoverable; a paste into
+//!   post is abandoned rather than fired blind. The same goes for *which* KakaoTalk window is
+//!   key: a menu key equivalent goes to the key window, so with several chats open the target
+//!   window is raised and then confirmed focused before the post. A failed send is recoverable; a paste into
 //!   someone else's window is not.
 //! - **Wait for a quiet moment.** Taking focus mid-keystroke is what makes the collision likely
 //!   in the first place, so the run waits for a gap in user input before activating.
@@ -38,7 +40,7 @@
 //!   restored, on every exit path including failures.
 
 use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
-use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+use core_foundation::base::{CFEqual, CFRelease, CFTypeRef, TCFType};
 use core_foundation::boolean::{CFBoolean, CFBooleanRef};
 use core_foundation::data::{CFData, CFDataRef};
 use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
@@ -89,6 +91,8 @@ const ROLE_TEXT_FIELD: &str = "AXTextField";
 const ATTR_DESCRIPTION: &str = "AXDescription";
 
 const ATTR_FRONTMOST: &str = "AXFrontmost";
+const ATTR_FOCUSED_WINDOW: &str = "AXFocusedWindow";
+const ATTR_MAIN: &str = "AXMain";
 const ATTR_ROWS: &str = "AXRows";
 const ATTR_FOCUSED: &str = "AXFocused";
 const ATTR_POSITION: &str = "AXPosition";
@@ -182,6 +186,16 @@ impl Drop for AxRef {
         if !self.0.is_null() {
             unsafe { CFRelease(self.0 as CFTypeRef) };
         }
+    }
+}
+
+/// Two references are equal when they name the same UI element, which is what
+/// `CFEqual` answers for `AXUIElement`s; the pointers themselves differ per copy.
+impl PartialEq for AxRef {
+    fn eq(&self, other: &Self) -> bool {
+        !self.0.is_null()
+            && !other.0.is_null()
+            && unsafe { CFEqual(self.0 as CFTypeRef, other.0 as CFTypeRef) } != 0
     }
 }
 
@@ -483,14 +497,84 @@ fn front_then<T>(pid: i32, action: impl FnOnce() -> T) -> Result<T, SendError> {
     Err(SendError::FocusLost)
 }
 
-/// Post a global key only while `pid` is confirmed frontmost.
+/// How long a window raise is given to settle before its focus is read back.
+const WINDOW_RAISE_SETTLE: Duration = Duration::from_millis(200);
+
+/// Make `window` the app's key window: raise it and, where the window supports
+/// it, mark it main.
 ///
-/// The confirmation is re-read immediately before the post, so the window in
-/// which the user could steal focus and receive the keystroke shrinks to the
-/// syscall in between. Without this, a Cmd+V meant for KakaoTalk lands in
-/// whatever the user clicked on.
-fn press_key_global_at(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
-    front_then(pid, || press_key_global(key, flags))?
+/// Activating the application alone does not decide which of its windows
+/// receives a menu key equivalent — that is whichever was key last. With several
+/// chat windows open, a Cmd+V aimed at one room would paste into another.
+/// `AXMain` is not settable on every window, so its result is not checked here;
+/// the focused-window check before the keystroke is what decides.
+fn raise_window(window: &AxRef) {
+    let raise = CFString::new(ACTION_RAISE);
+    unsafe { AXUIElementPerformAction(window.as_raw(), raise.as_concrete_TypeRef()) };
+    let main = CFString::new(ATTR_MAIN);
+    let yes = CFBoolean::true_value();
+    unsafe {
+        AXUIElementSetAttributeValue(
+            window.as_raw(),
+            main.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
+    };
+    std::thread::sleep(WINDOW_RAISE_SETTLE);
+}
+
+/// The application's focused (key) window, if it reports one.
+fn focused_window(pid: i32) -> Option<AxRef> {
+    let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
+    // copy_attr hands back a +1 reference, which AxRef releases.
+    copy_attr(app.as_raw(), ATTR_FOCUSED_WINDOW).map(|raw| AxRef(raw as AXUIElementRef))
+}
+
+/// Whether a global keystroke meant for `target` may be posted, given the
+/// window that is focused right now.
+///
+/// An unreadable focus is treated as a mismatch: a global key goes wherever
+/// focus is, so not knowing where that is means not posting.
+fn keystroke_may_post<W: PartialEq + ?Sized>(target: &W, focused: Option<&W>) -> bool {
+    focused.is_some_and(|focused| focused == target)
+}
+
+/// Title of a window for an error message, or a marker when there is none.
+fn window_label(window: Option<&AxRef>) -> String {
+    match window {
+        None => "(no focused window)".to_string(),
+        Some(window) => attr_string(window.as_raw(), ATTR_TITLE)
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "(untitled window)".to_string()),
+    }
+}
+
+/// Post a global key only while `pid` is frontmost **and** `window` is its
+/// focused window.
+///
+/// [`front_then`] only proves the right application is in front. A menu key
+/// equivalent is then handled by that application's key window, so
+/// with several chat windows open the paste can still land in the wrong room.
+/// The focused window is read inside the same step as the post, and a mismatch
+/// abandons the keystroke rather than sending it somewhere else. Frontmost is
+/// re-confirmed in that step too, so the gap in which the user could steal focus
+/// and receive the keystroke shrinks to the syscalls in between.
+fn press_key_global_in_window(
+    pid: i32,
+    window: &AxRef,
+    key: u16,
+    flags: CGEventFlags,
+) -> Result<(), SendError> {
+    front_then(pid, || {
+        let focused = focused_window(pid);
+        if !keystroke_may_post(window, focused.as_ref()) {
+            return Err(SendError::WindowFocusLost {
+                expected: window_label(Some(window)),
+                actual: window_label(focused.as_ref()),
+            });
+        }
+        press_key_global(key, flags)
+    })?
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -570,6 +654,12 @@ pub enum SendError {
          Nothing was sent; retry."
     )]
     FocusLost,
+    #[error(
+        "the chat window '{expected}' was not KakaoTalk's focused window at the moment the \
+         keystroke would have been sent (focused: '{actual}'), so it was not sent — it would \
+         have gone into the wrong chat. Nothing was sent; retry."
+    )]
+    WindowFocusLost { expected: String, actual: String },
     #[error(
         "the chat list reordered while '{room}' was being opened, so the click was not sent — \
          it would have landed on whichever room took that position. Nothing was opened; retry."
@@ -1063,6 +1153,9 @@ pub fn send_image_to_open_window(
         ctx,
         &format!("{} · {}", target.name, attachment_label(image_path)),
     )?;
+    // The app being frontmost is not enough: Cmd+V goes to its key window,
+    // which with several chats open may be a different room.
+    raise_window(&window);
 
     if let Some(compose) = compose_box(window.as_raw()) {
         let focus_key = CFString::new(ATTR_FOCUSED);
@@ -1080,8 +1173,9 @@ pub fn send_image_to_open_window(
         return Err(SendError::Cancelled);
     }
     // KakaoTalk is confirmed frontmost, so the global tap is the reliable route for the paste
-    // — and the confirmation is re-read inside this call, immediately before the post.
-    press_key_global_at(pid, KEY_V, CGEventFlags::CGEventFlagCommand)?;
+    // — and both the frontmost app and its focused window are re-read inside this call,
+    // immediately before the post.
+    press_key_global_in_window(pid, &window, KEY_V, CGEventFlags::CGEventFlagCommand)?;
 
     // Depending on version KakaoTalk either shows a confirmation sheet or sends straight away,
     // so both are handled — but success is only ever claimed once a new transcript row exists.
@@ -1789,9 +1883,7 @@ pub fn send_to_open_window(
     // their input, and only if KakaoTalk verifiably comes forward. A global Enter fired while
     // the user is back in their own app would submit whatever they were in the middle of.
     let _hold = take_screen(pid, ctx, &format!("{} 로 전송 중", target.name))?;
-    let raise = CFString::new(ACTION_RAISE);
-    unsafe { AXUIElementPerformAction(window.as_raw(), raise.as_concrete_TypeRef()) };
-    std::thread::sleep(Duration::from_millis(200));
+    raise_window(&window);
     let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {
         AXUIElementSetAttributeValue(
@@ -1800,7 +1892,7 @@ pub fn send_to_open_window(
             yes.as_CFTypeRef(),
         )
     };
-    press_key_global_at(pid, KEY_RETURN, CGEventFlags::CGEventFlagNull)?;
+    press_key_global_in_window(pid, &window, KEY_RETURN, CGEventFlags::CGEventFlagNull)?;
     if accepted(30) {
         return Ok(());
     }
@@ -1867,6 +1959,9 @@ pub fn draft_to_open_window(
     put_text_on_clipboard(text)?;
 
     let _hold = take_screen(pid, ctx, &format!("{} 초안 작성 중", target.name))?;
+    // Cmd+V goes to the key window, not to whichever window was resolved, so
+    // the draft room has to be made key first and checked again before the paste.
+    raise_window(&window);
     let focus_key = CFString::new(ATTR_FOCUSED);
     let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {
@@ -1876,7 +1971,7 @@ pub fn draft_to_open_window(
             yes.as_CFTypeRef(),
         )
     };
-    press_key_global_at(pid, KEY_V, CGEventFlags::CGEventFlagCommand)?;
+    press_key_global_in_window(pid, &window, KEY_V, CGEventFlags::CGEventFlagCommand)?;
 
     // The box must end up holding the draft. Empty means either the paste never
     // landed or — the case that matters — it was sent, and reporting a waiting
@@ -1936,6 +2031,26 @@ pub fn open_window_titles() -> Result<Vec<String>, SendError> {
         .filter_map(|w| attr_string(w.as_raw(), ATTR_TITLE))
         .filter(|t| !t.is_empty())
         .collect())
+}
+
+#[cfg(test)]
+mod window_focus_tests {
+    use super::keystroke_may_post;
+
+    #[test]
+    fn posts_only_into_the_target_window() {
+        assert!(keystroke_may_post("Alpha", Some("Alpha")));
+    }
+
+    #[test]
+    fn another_focused_window_blocks_the_keystroke() {
+        assert!(!keystroke_may_post("Alpha", Some("Beta")));
+    }
+
+    #[test]
+    fn an_unreadable_focus_blocks_the_keystroke() {
+        assert!(!keystroke_may_post::<str>("Alpha", None));
+    }
 }
 
 #[cfg(test)]
