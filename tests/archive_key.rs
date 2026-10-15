@@ -36,14 +36,23 @@ fn keyed_archive_is_not_plaintext_and_needs_the_key() {
             .execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (1);")
             .unwrap();
     });
-    assert!(!header_is_plaintext(&path), "encrypted file must not carry the SQLite header");
+    assert!(
+        !header_is_plaintext(&path),
+        "encrypted file must not carry the SQLite header"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     let without = with_key(None, || Archive::open(&path).map(|_| ()));
-    assert!(matches!(without, Err(katok::Error::ArchiveKeyRequired(_))), "{without:?}");
+    assert!(
+        matches!(without, Err(katok::Error::ArchiveKeyRequired(_))),
+        "{without:?}"
+    );
     let wrong = with_key(Some(OTHER), || Archive::open(&path).map(|_| ()));
     assert!(wrong.is_err());
     with_key(Some(KEY), || {
