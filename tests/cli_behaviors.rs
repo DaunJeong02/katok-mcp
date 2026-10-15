@@ -166,9 +166,12 @@ fn cli_reports_semantic_index_states_when_embedder_is_local_test_or_mocked() {
         ])
         .assert()
         .failure()
-        .stdout(predicate::str::contains(
-            "semantic index has never been synced",
-        ));
+        // A slim build refuses before looking for an index: it has no model.
+        .stdout(predicate::str::contains(if cfg!(feature = "semantic") {
+            "semantic index has never been synced"
+        } else {
+            "semantic_feature_disabled"
+        }));
 
     Command::cargo_bin("katok")
         .expect("katok binary")

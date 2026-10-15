@@ -1,6 +1,6 @@
 use crate::cli::{Commands, PermissionsCommand, SearchCommand, SourceCommand};
 use crate::commands::source_adapter::adapter_for_source;
-use crate::support::{dependency_status, print_payload};
+use crate::support::{block_on, dependency_status, print_payload};
 use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
@@ -595,19 +595,14 @@ fn run_search(
         }
         SearchCommand::Semantic { query, limit, json } => {
             katok::semantic::ensure_embedder_available()?;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("create semantic runtime")?;
-            let hits = runtime
-                .block_on(semantic_search_live_with_config(
-                    &archive,
-                    semantic_dir,
-                    &query,
-                    limit,
-                    config,
-                ))
-                .context("semantic search")?;
+            let hits = block_on(semantic_search_live_with_config(
+                &archive,
+                semantic_dir,
+                &query,
+                limit,
+                config,
+            ))?
+            .context("semantic search")?;
             print_payload(json, &hits)
         }
     }

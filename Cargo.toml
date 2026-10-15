@@ -22,7 +22,7 @@ default = ["private-send", "semantic"]
 # Local EmbeddingGemma vectors for `katok index` and `katok search semantic`.
 # Pulls in fastembed and its ONNX Runtime download. Builds that only read,
 # sync, extract media, or send can turn it off with --no-default-features.
-semantic = ["dep:fastembed"]
+semantic = ["dep:fastembed", "dep:tokio"]
 private-send = [
     "dep:core-foundation",
     "dep:core-graphics",
@@ -54,7 +54,7 @@ serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 toml = "0.8"
 unicode-normalization = "0.1.25"
 libc = "0.2"
@@ -67,6 +67,33 @@ objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", optional = true }
 objc2-core-foundation = { version = "0.3.2", optional = true }
 objc2-foundation = { version = "0.3.2", optional = true }
+
+# Size-first build for the slim sidecar that apps bundle:
+#   cargo build --profile sidecar --no-default-features --features private-send
+# The binary lands in target/sidecar/katok. `sidecar-symbols` is the same code
+# generation with symbols and line tables kept, for symbolicating a crash.
+#
+# panic = "abort": a panic ends the process instead of unwinding. The send
+# curtain's input tap and overlay belong to this process, so they go away with
+# it; what is lost is the unwinding guards' own cleanup (focus and clipboard
+# restore), which only matters on a bug path that already reports failure.
+#
+# opt-level 3, not "z": measured on the slim build, "z" was 6.3 MB against
+# 8.0 MB but made `sync` 25-70% slower (SHA-512 key recovery, decrypt, insert);
+# `rooms` was the same either way.
+[profile.sidecar]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
+[profile.sidecar-symbols]
+inherits = "sidecar"
+strip = "none"
+debug = "line-tables-only"
 
 [dev-dependencies]
 assert_cmd = "2"

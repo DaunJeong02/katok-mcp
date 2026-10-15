@@ -1,4 +1,4 @@
-use crate::support::print_payload;
+use crate::support::{block_on, print_payload};
 use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
@@ -66,19 +66,14 @@ struct LiveIndexInput<'a> {
 }
 
 fn run_live_index(input: LiveIndexInput<'_>) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create semantic runtime")?;
-    let report = runtime
-        .block_on(index_semantic_live_for_parents(
-            input.archive,
-            input.parents,
-            input.semantic_dir,
-            input.config,
-            input.full,
-        ))
-        .context("index semantic documents")?;
+    let report = block_on(index_semantic_live_for_parents(
+        input.archive,
+        input.parents,
+        input.semantic_dir,
+        input.config,
+        input.full,
+    ))?
+    .context("index semantic documents")?;
     let generation = katok::semantic::current_generation(input.semantic_dir)
         .context("resolve committed semantic generation")?;
     let documents = planned_semantic_documents_for_parents(input.parents, &generation);

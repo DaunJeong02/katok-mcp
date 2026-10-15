@@ -33,6 +33,13 @@
   download. `--no-default-features --features private-send` builds a binary
   for read, sync, media and send without them; `index` and `search semantic`
   then fail up front with `semantic_feature_disabled`.
+- `tokio` is now part of the `semantic` feature too. A slim build drives the
+  test embedder's futures with a single poll instead, so it no longer links a
+  runtime (-258 KB).
+- New `sidecar` Cargo profile for the binary apps bundle: fat LTO, one codegen
+  unit, `panic = "abort"`, symbols stripped. The slim build drops from 11.2 MB
+  to 8.0 MB with `sync` and `rooms` as fast as before. `sidecar-symbols` keeps
+  symbols and line tables for symbolicating a crash.
 
 ## 0.3.2 - 2026-08-12
 
