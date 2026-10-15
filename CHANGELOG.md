@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Send
+
+- Pasting an image or a draft, and the global-Enter fallback for text, now
+  raise the target chat window (`AXRaise`, plus `AXMain` where settable) and
+  confirm it is KakaoTalk's `AXFocusedWindow` immediately before the
+  keystroke. Activating the app alone left the paste to whichever window was
+  key last, so with several chats open it could land in another room. A
+  mismatch fails with `WindowFocusLost` and posts nothing.
+
+### Reading
+
+- The self chat (the memo room whose only member is the account owner) is
+  now typed `self` and named after the owner's nickname, which is how
+  KakaoTalk titles its window. It used to come out as a `chat-<id>` group,
+  which `send --chat` could not match to a window.
+
+### Media
+
+- A cached video that decrypts but has no complete top-level `moov` box is no
+  longer reported as `full`. It is recorded as `full-incomplete`, nothing is
+  written for it, and the CDN and thumbnail tiers are tried instead.
+
+### Build
+
+- New default-on `semantic` feature gates `fastembed` and its ONNX Runtime
+  download. `--no-default-features --features private-send` builds a binary
+  for read, sync, media and send without them; `index` and `search semantic`
+  then fail up front with `semantic_feature_disabled`.
+
 ## 0.3.2 - 2026-08-12
 
 ### Release
