@@ -60,6 +60,7 @@ fn error_code(error: &anyhow::Error) -> &'static str {
         Some(katok::Error::SemanticIndexStale(_)) => "semantic_index_stale",
         Some(katok::Error::SemanticIndexBusy(_)) => "semantic_index_busy",
         Some(katok::Error::EmptyQuery) => "empty_query",
+        Some(katok::Error::SemanticFeatureDisabled) => "semantic_feature_disabled",
         Some(katok::Error::Sql(_)) => "sqlite_error",
         _ => "command_failed",
     }

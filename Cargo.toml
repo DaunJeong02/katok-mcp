@@ -18,7 +18,11 @@ exclude = [
 ]
 
 [features]
-default = ["private-send"]
+default = ["private-send", "semantic"]
+# Local EmbeddingGemma vectors for `katok index` and `katok search semantic`.
+# Pulls in fastembed and its ONNX Runtime download. Builds that only read,
+# sync, extract media, or send can turn it off with --no-default-features.
+semantic = ["dep:fastembed"]
 private-send = [
     "dep:core-foundation",
     "dep:core-graphics",
@@ -40,7 +44,7 @@ cbc = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
-fastembed = { version = "5.16.1", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries-native-tls"] }
+fastembed = { version = "5.16.1", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries-native-tls"], optional = true }
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false }
 rayon = "1"

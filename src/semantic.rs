@@ -7,6 +7,7 @@ use crate::{archive::Archive, Error, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub use embedder::ensure_embedder_available;
 pub use live::{
     committed_cursor, index_semantic_live, index_semantic_live_for_parents,
     semantic_search_live_with_config, SemanticIndexReport, STORE_DIR,

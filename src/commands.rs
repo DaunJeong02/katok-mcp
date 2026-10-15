@@ -594,6 +594,7 @@ fn run_search(
             print_payload(json, &hits)
         }
         SearchCommand::Semantic { query, limit, json } => {
+            katok::semantic::ensure_embedder_available()?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

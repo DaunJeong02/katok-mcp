@@ -55,6 +55,12 @@ pub enum Error {
     Embedding(String),
     #[error("local embedding model unavailable; set KATOK_EMBEDDER=local-test for synthetic QA")]
     EmbedderUnavailable,
+    #[error(
+        "this katok build was compiled without the `semantic` feature, so `katok index` and \
+         `katok search semantic` are unavailable; keyword and bm25 search still work. Rebuild \
+         with default features to enable them"
+    )]
+    SemanticFeatureDisabled,
     #[error("{0}")]
     Kakaocli(String),
     #[error("KakaoTalk reader error: {0}")]

@@ -1,7 +1,5 @@
-use crate::{
-    config::{KatokConfig, DEFAULT_EMBEDDER_MODEL},
-    Error, Result,
-};
+use crate::{config::KatokConfig, Error, Result};
+#[cfg(feature = "semantic")]
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use sha2::{Digest, Sha256};
 
@@ -17,22 +15,57 @@ pub(crate) trait SemanticEmbedder {
     }
 }
 
-pub(crate) fn create_embedder(config: &KatokConfig) -> Result<Box<dyn SemanticEmbedder>> {
-    match std::env::var("KATOK_EMBEDDER").ok().as_deref() {
-        Some("mock" | "local-test") => Ok(Box::new(DeterministicEmbedder::new(usize::from(
-            config.vector_dimension,
-        )))),
-        _ => Ok(Box::new(FastEmbedder::new(config)?)),
+/// Whether `KATOK_EMBEDDER` selects the deterministic test embedder, which
+/// needs no model and so works in every build.
+fn test_embedder_requested() -> bool {
+    matches!(
+        std::env::var("KATOK_EMBEDDER").ok().as_deref(),
+        Some("mock" | "local-test")
+    )
+}
+
+/// Fail before any work when this build cannot embed at all.
+///
+/// Without the `semantic` feature there is no local model, so `index` and
+/// `search semantic` would otherwise get as far as staging a generation before
+/// discovering that. The test embedder stays usable, which keeps the synthetic
+/// suite runnable against a slim build.
+pub fn ensure_embedder_available() -> Result<()> {
+    if cfg!(feature = "semantic") || test_embedder_requested() {
+        Ok(())
+    } else {
+        Err(Error::SemanticFeatureDisabled)
     }
 }
 
+pub(crate) fn create_embedder(config: &KatokConfig) -> Result<Box<dyn SemanticEmbedder>> {
+    if test_embedder_requested() {
+        return Ok(Box::new(DeterministicEmbedder::new(usize::from(
+            config.vector_dimension,
+        ))));
+    }
+    real_embedder(config)
+}
+
+#[cfg(feature = "semantic")]
+fn real_embedder(config: &KatokConfig) -> Result<Box<dyn SemanticEmbedder>> {
+    Ok(Box::new(FastEmbedder::new(config)?))
+}
+
+#[cfg(not(feature = "semantic"))]
+fn real_embedder(_config: &KatokConfig) -> Result<Box<dyn SemanticEmbedder>> {
+    Err(Error::SemanticFeatureDisabled)
+}
+
+#[cfg(feature = "semantic")]
 struct FastEmbedder {
     inner: TextEmbedding,
 }
 
+#[cfg(feature = "semantic")]
 impl FastEmbedder {
     fn new(config: &KatokConfig) -> Result<Self> {
-        if config.embedder_model != DEFAULT_EMBEDDER_MODEL {
+        if config.embedder_model != crate::config::DEFAULT_EMBEDDER_MODEL {
             return Err(Error::Embedding(format!(
                 "unsupported local embedder model: {}",
                 config.embedder_model
@@ -45,6 +78,7 @@ impl FastEmbedder {
     }
 }
 
+#[cfg(feature = "semantic")]
 impl SemanticEmbedder for FastEmbedder {
     fn id(&self) -> &'static str {
         "embeddinggemma/local"
@@ -126,6 +160,7 @@ fn normalize(vector: &mut [f32]) {
     }
 }
 
+#[cfg(feature = "semantic")]
 fn to_embedding_error(error: impl std::fmt::Display) -> Error {
     Error::Embedding(error.to_string())
 }

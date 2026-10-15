@@ -47,11 +47,21 @@ Cargo:
 cargo install katok
 ```
 
-기본 설치는 macOS에서 `katok send`를 포함합니다. 검색·아카이브 기능만 필요한
-경우 전송 기능 없이 설치할 수 있습니다.
+기본 설치는 macOS에서 `katok send`(`private-send` feature)와 로컬 벡터 검색
+(`semantic` feature)을 모두 포함합니다. 검색·아카이브 기능만 필요한 경우 전송
+기능 없이 설치할 수 있습니다.
 
 ```bash
-cargo install katok --no-default-features
+cargo install katok --no-default-features --features semantic
+```
+
+반대로 읽기·동기화·미디어·전송만 쓰고 벡터 검색이 필요 없으면 `semantic`을 빼서
+fastembed와 ONNX Runtime 없이 설치할 수 있습니다. 이 빌드에서 `katok index`와
+`katok search semantic`은 바로 에러(`semantic_feature_disabled`)를 내고,
+keyword·bm25 검색은 그대로 동작합니다.
+
+```bash
+cargo install katok --no-default-features --features private-send
 ```
 
 Cargo로 설치했는데 `katok: command not found`가 나오면 현재 셸이 Cargo binary 경로를 못 보고 있는 상태입니다.

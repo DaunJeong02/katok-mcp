@@ -17,6 +17,9 @@ pub(crate) fn run(
     semantic_dir: &Path,
     _data_dir: &Path,
 ) -> Result<()> {
+    if !dry_run {
+        katok::semantic::ensure_embedder_available()?;
+    }
     if !archive_path.is_file() {
         anyhow::bail!("archive is missing; run katok sync before katok index");
     }
