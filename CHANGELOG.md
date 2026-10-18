@@ -18,6 +18,13 @@
   sleeping 200 ms. Before a chat-list row is clicked, the list waits until it
   is focused plus a 150 ms settle, never more than the old fixed 300 ms.
   Clearing the chat search afterwards reads the box back every 30 ms.
+- Opening a closed room by search no longer falls through to the slow
+  list scans when the chat list still shows the results of an earlier
+  search for the same text. KakaoTalk filters only on typed input, so the
+  box cleared through AX leaves those results up, typing the same text
+  changes nothing, and the "filter has not taken effect" wait used to run
+  out. A list of the pre-query length is now taken when every row reads
+  back as a room, so no unrendered row can hide a second room of that name.
 
 ### Reading
 

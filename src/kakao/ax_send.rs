@@ -940,9 +940,24 @@ impl RoomTarget {
 
 /// Pick the one row that is the target, or say why that cannot be decided.
 fn choose_row<'a>(rows: &'a [AxRef], target: &RoomTarget) -> Result<&'a AxRef, SendError> {
+    let names: Vec<Option<String>> = rows.iter().map(|r| row_room_name(r.as_raw())).collect();
+    choose_named(rows, &names, target)
+}
+
+/// [`choose_row`] over names already read (`names[i]` is `rows[i]`'s, `None` when unreadable).
+fn choose_named<'a>(
+    rows: &'a [AxRef],
+    names: &[Option<String>],
+    target: &RoomTarget,
+) -> Result<&'a AxRef, SendError> {
     let named: Vec<&AxRef> = rows
         .iter()
-        .filter(|r| row_room_name(r.as_raw()).is_some_and(|name| room_matches(&name, &target.name)))
+        .zip(names)
+        .filter(|(_, name)| {
+            name.as_deref()
+                .is_some_and(|name| room_matches(name, &target.name))
+        })
+        .map(|(row, _)| row)
         .collect();
     match named.len() {
         0 => Err(SendError::RoomNotInChatList {
@@ -1642,10 +1657,33 @@ fn open_room_via_search(
             continue;
         };
         let rows = child_elements(table.as_raw(), ATTR_ROWS);
-        if rows.is_empty() || rows.len() == full_list {
-            continue; // filtering has not taken effect yet
+        if rows.is_empty() {
+            continue;
         }
-        match choose_row(&rows, target) {
+        let picked = if rows.len() == full_list {
+            // Either the filter has not taken effect yet, or the list was already showing
+            // these results: KakaoTalk filters only on typed input, so after an earlier search
+            // for the same text whose box was cleared through AX, its results stay up and
+            // typing the text again changes nothing. A list like that is acted on only when
+            // every row reads back as a room, so no unrendered row can hide a second room of
+            // the same name. An unfiltered list longer than the window is never fully
+            // rendered, and its last row is the cheap tell.
+            if rows
+                .last()
+                .is_none_or(|row| row_room_name(row.as_raw()).is_none())
+            {
+                continue;
+            }
+            let names: Vec<Option<String>> =
+                rows.iter().map(|r| row_room_name(r.as_raw())).collect();
+            if names.iter().any(Option::is_none) {
+                continue;
+            }
+            choose_named(&rows, &names, target)
+        } else {
+            choose_row(&rows, target)
+        };
+        match picked {
             Ok(hit) => return open_row_by_click(app, windows, hit.as_raw(), target, pid),
             // Two rooms of this name and nothing to tell them apart: waiting
             // will not change that, so stop rather than retry.
@@ -1656,11 +1694,12 @@ fn open_room_via_search(
     Err(SendError::RoomNotFound(target.name.clone()))
 }
 
-/// Clear the search box so the user's chat list is left exactly as it was found.
+/// Clear the search box so the user's chat list is left as it was found.
 ///
-/// KakaoTalk re-filters on a *change* of the field's value, so writing "" over a value that is
-/// already "" is a no-op and would leave the list visibly filtered. Write a throwaway value
-/// first to guarantee a change, then verify the list actually came back.
+/// Only the box is cleared for sure. KakaoTalk filters the list on typed input, not on an
+/// `AXValue` write, so the results can stay up until the list next refreshes; the next search
+/// copes with that ([`open_room_via_search`]). Typing here instead would go to the room window
+/// that just opened.
 fn clear_search(windows: &[AxRef]) {
     let Some(main) = main_window(windows) else {
         return;
