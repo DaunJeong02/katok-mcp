@@ -76,6 +76,30 @@ pub struct ResolvedAuth {
     pub uuid: String,
     pub source: &'static str,
     pub database_files: Vec<PathBuf>,
+    /// The SQLCipher passphrase `verify` already derived for this pair, so readers do not
+    /// derive it a second time (100k PBKDF2 rounds). In memory only, never persisted.
+    pub key: DatabaseKey,
+}
+
+/// A derived KakaoTalk database passphrase. `Debug` never prints it, so a
+/// `{:?}` of an auth result cannot leak it into a log or an error.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DatabaseKey(String);
+
+impl DatabaseKey {
+    pub fn derive(user_id: i64, uuid: &str) -> Self {
+        Self(derive::secure_key(user_id, uuid))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for DatabaseKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatabaseKey(<redacted>)")
+    }
 }
 
 /// Inputs for auth resolution. The home directory and explicit overrides are
@@ -162,15 +186,16 @@ fn preference_paths(home: &Path) -> Vec<PathBuf> {
 /// DB files in the container dir matching `^[0-9a-f]{78}(?:\.db)?$`.
 pub fn discover_database_files(container: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(container) {
+        // Name first: the container holds many other files, and the name test needs no stat.
         Ok(entries) => entries
             .flatten()
             .map(|entry| entry.path())
-            .filter(|path| path.is_file())
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(is_hex_db_name)
             })
+            .filter(|path| path.is_file())
             .collect(),
         Err(_) => Vec::new(),
     };
@@ -429,14 +454,45 @@ fn sha512_hex_eq(digest: &[u8], target_hex: &[u8]) -> bool {
 }
 
 /// Verify a `(user_id, uuid)` by deriving its key and opening any DB. Returns
-/// the openable DB list when the key works against at least one file.
-fn verify(user_id: i64, uuid: &str, database_files: &[PathBuf]) -> Option<Vec<PathBuf>> {
-    let key = derive::secure_key(user_id, uuid);
+/// the openable DB list, and the key that opened them, when the key works
+/// against at least one file.
+fn verify(
+    user_id: i64,
+    uuid: &str,
+    database_files: &[PathBuf],
+) -> Option<(Vec<PathBuf>, DatabaseKey)> {
+    // Two independent 100k-round derivations when there are several files: run them side by
+    // side.
+    let (key, ordered) = rayon::join(
+        || DatabaseKey::derive(user_id, uuid),
+        || probe_order(user_id, uuid, database_files),
+    );
+
+    let mut openable: Vec<PathBuf> = Vec::new();
+    for path in &ordered {
+        if probe_database(path, key.as_str()).unwrap_or(false) {
+            openable.push((*path).clone());
+        }
+    }
+    if openable.is_empty() {
+        None
+    } else {
+        Some((openable, key))
+    }
+}
+
+/// The derived-name DB first, then any other candidate. Mirrors the reference
+/// `prioritized_database_paths`, which treats both `<derived>` and
+/// `<derived>.db` as the prioritized derived match.
+///
+/// The derived name costs a second 100k-round PBKDF2, and its only use is this
+/// order, so a lone database file (the usual install) skips it.
+fn probe_order<'a>(user_id: i64, uuid: &str, database_files: &'a [PathBuf]) -> Vec<&'a PathBuf> {
+    if database_files.len() < 2 {
+        return database_files.iter().collect();
+    }
     let derived_name = derive::database_name(user_id, uuid);
     let derived_name_db = format!("{derived_name}.db");
-    // Probe the derived-name DB first, then any other candidate. Mirror the
-    // reference `prioritized_database_paths`, which treats both `<derived>` and
-    // `<derived>.db` as the prioritized derived match.
     let is_derived = |path: &PathBuf| -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
@@ -447,18 +503,20 @@ fn verify(user_id: i64, uuid: &str, database_files: &[PathBuf]) -> Option<Vec<Pa
         .filter(|path| is_derived(path))
         .collect();
     ordered.extend(database_files.iter().filter(|path| !is_derived(path)));
+    ordered
+}
 
-    let mut openable: Vec<PathBuf> = Vec::new();
-    for path in &ordered {
-        if probe_database(path, &key).unwrap_or(false) {
-            openable.push((*path).clone());
-        }
-    }
-    if openable.is_empty() {
-        None
-    } else {
-        Some(openable)
-    }
+/// Step b of [`resolve_auth`]: the katok cache, verified against the databases.
+fn from_katok_cache(cache: &Path, database_files: &[PathBuf]) -> Option<ResolvedAuth> {
+    let (user_id, uuid) = read_katok_cache(cache)?;
+    let (openable, key) = verify(user_id, &uuid, database_files)?;
+    Some(ResolvedAuth {
+        user_id,
+        uuid,
+        source: "katok-cache",
+        database_files: openable,
+        key,
+    })
 }
 
 /// Resolve and verify auth following the documented precedence chain.
@@ -471,49 +529,53 @@ pub fn resolve_auth(options: &AuthOptions) -> Result<ResolvedAuth> {
         ));
     }
 
+    let katok_cache = katok_cache_path(&options.data_dir);
+
+    // b. katok cache ({user_id, uuid}) first when nothing is overridden: it
+    // carries its own uuid, so the common path needs no `ioreg` run.
+    if options.uuid_override.is_none() && options.user_id_override.is_none() {
+        if let Some(found) = from_katok_cache(&katok_cache, &database_files) {
+            return Ok(found);
+        }
+    }
+
     let uuid = match &options.uuid_override {
         Some(uuid) => uuid.clone(),
         None => platform_uuid()?,
     };
 
-    let katok_cache = katok_cache_path(&options.data_dir);
-
     // a. explicit override
     if let Some(user_id) = options.user_id_override {
-        if let Some(openable) = verify(user_id, &uuid, &database_files) {
+        if let Some((openable, key)) = verify(user_id, &uuid, &database_files) {
             persist_katok_cache(&katok_cache, user_id, &uuid);
             return Ok(ResolvedAuth {
                 user_id,
                 uuid,
                 source: "override",
                 database_files: openable,
+                key,
             });
         }
     }
 
-    // b. katok cache ({user_id, uuid})
-    if options.uuid_override.is_none() {
-        if let Some((cached_id, cached_uuid)) = read_katok_cache(&katok_cache) {
-            if let Some(openable) = verify(cached_id, &cached_uuid, &database_files) {
-                return Ok(ResolvedAuth {
-                    user_id: cached_id,
-                    uuid: cached_uuid,
-                    source: "katok-cache",
-                    database_files: openable,
-                });
-            }
+    // b. katok cache ({user_id, uuid}), in its documented place after the
+    // override when the override did not open anything.
+    if options.uuid_override.is_none() && options.user_id_override.is_some() {
+        if let Some(found) = from_katok_cache(&katok_cache, &database_files) {
+            return Ok(found);
         }
     }
 
     // c. k-skill cache bootstrap (user_id only)
     if let Some(user_id) = read_user_id_from_json(&k_skill_cache_path(&options.home)) {
-        if let Some(openable) = verify(user_id, &uuid, &database_files) {
+        if let Some((openable, key)) = verify(user_id, &uuid, &database_files) {
             persist_katok_cache(&katok_cache, user_id, &uuid);
             return Ok(ResolvedAuth {
                 user_id,
                 uuid,
                 source: "k-skill-cache",
                 database_files: openable,
+                key,
             });
         }
     }
@@ -532,13 +594,14 @@ pub fn resolve_auth(options: &AuthOptions) -> Result<ResolvedAuth> {
     candidates.sort_unstable();
     candidates.dedup();
     for user_id in &candidates {
-        if let Some(openable) = verify(*user_id, &uuid, &database_files) {
+        if let Some((openable, key)) = verify(*user_id, &uuid, &database_files) {
             persist_katok_cache(&katok_cache, *user_id, &uuid);
             return Ok(ResolvedAuth {
                 user_id: *user_id,
                 uuid,
                 source: "plist",
                 database_files: openable,
+                key,
             });
         }
     }
@@ -548,13 +611,14 @@ pub fn resolve_auth(options: &AuthOptions) -> Result<ResolvedAuth> {
         eprintln!("katok: recovering KakaoTalk user id (one-time SHA-512 scan)...");
         if let Some(user_id) = recover_user_id_from_sha512(&hash, options.max_user_id) {
             if !candidates.contains(&user_id) {
-                if let Some(openable) = verify(user_id, &uuid, &database_files) {
+                if let Some((openable, key)) = verify(user_id, &uuid, &database_files) {
                     persist_katok_cache(&katok_cache, user_id, &uuid);
                     return Ok(ResolvedAuth {
                         user_id,
                         uuid,
                         source: "sha512-recovery",
                         database_files: openable,
+                        key,
                     });
                 }
             }

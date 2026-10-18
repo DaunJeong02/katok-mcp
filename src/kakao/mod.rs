@@ -21,9 +21,10 @@ pub mod send_curtain;
 
 use std::path::PathBuf;
 
+use crate::types::SourceCursor;
 use crate::{Error, Result};
 
-pub use auth::{probe_status, AuthOptions, ProbeStatus, ResolvedAuth};
+pub use auth::{probe_status, AuthOptions, DatabaseKey, ProbeStatus, ResolvedAuth};
 pub use media_reader::{read_media_frames_with_options, MediaQuery};
 pub use reader::{ChatRecord, ReaderOutput};
 
@@ -35,8 +36,19 @@ pub fn read_kakao(home: PathBuf, data_dir: PathBuf) -> Result<ReaderOutput> {
 
 /// Resolve auth using explicit `options` (injectable for tests), then read.
 pub fn read_kakao_with_options(options: &AuthOptions) -> Result<ReaderOutput> {
+    read_kakao_since(options, &[])
+}
+
+/// [`read_kakao_with_options`] that reads each database only past its cursor in `cursors`
+/// (see [`reader::read_databases_with_key`]). Empty `cursors` reads everything.
+pub fn read_kakao_since(options: &AuthOptions, cursors: &[SourceCursor]) -> Result<ReaderOutput> {
     let resolved = auth::resolve_auth(options)?;
-    reader::read_databases(&resolved.database_files, resolved.user_id, &resolved.uuid)
+    reader::read_databases_with_key(
+        &resolved.database_files,
+        resolved.user_id,
+        &resolved.key,
+        cursors,
+    )
 }
 
 /// Resolve the default home directory, mirroring `crate::paths`.

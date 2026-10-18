@@ -1,11 +1,34 @@
 use crate::kakao::{AuthOptions, ReaderOutput};
-use crate::{types::RawMessage, Result};
+use crate::{
+    types::{RawMessage, SourceCursor},
+    Result,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub trait SourceAdapter {
     fn chats(&self) -> Result<Vec<ChatSummary>>;
     fn messages(&self) -> Result<Vec<RawMessage>>;
+
+    /// Messages past `cursors` (where the previous sync of this source stopped), with the
+    /// cursors where this read stopped. Empty `cursors` reads everything. A source that has no
+    /// cursors reads everything and returns none, which leaves every sync a full one.
+    fn messages_since(&self, _cursors: &[SourceCursor]) -> Result<SourceRead> {
+        Ok(SourceRead {
+            messages: self.messages()?,
+            cursors: Vec::new(),
+            incremental: false,
+        })
+    }
+}
+
+/// One read of a source for `sync`.
+#[derive(Debug, Clone)]
+pub struct SourceRead {
+    pub messages: Vec<RawMessage>,
+    pub cursors: Vec<SourceCursor>,
+    /// Every database was read past a cursor that still held, not in full.
+    pub incremental: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -97,6 +120,16 @@ impl SourceAdapter for MacosAdapter {
 
     fn messages(&self) -> Result<Vec<RawMessage>> {
         Ok(self.read()?.messages)
+    }
+
+    /// Not memoized: each call reads the databases from `cursors` on.
+    fn messages_since(&self, cursors: &[SourceCursor]) -> Result<SourceRead> {
+        let output = crate::kakao::read_kakao_since(&self.options, cursors)?;
+        Ok(SourceRead {
+            messages: output.messages,
+            cursors: output.cursors,
+            incremental: output.incremental,
+        })
     }
 }
 

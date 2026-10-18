@@ -13,6 +13,11 @@
 - Opening a closed room by chat-list search now raises the chat list and
   types the query only once it is KakaoTalk's focused window. With a chat
   window key, the query could go into that room's compose box.
+- Raising a window before a keystroke now waits until it reads back as
+  KakaoTalk's focused window (up to the old fixed 200 ms) instead of always
+  sleeping 200 ms. Before a chat-list row is clicked, the list waits until it
+  is focused plus a 150 ms settle, never more than the old fixed 300 ms.
+  Clearing the chat search afterwards reads the box back every 30 ms.
 
 ### Reading
 
@@ -20,6 +25,24 @@
   now typed `self` and named after the owner's nickname, which is how
   KakaoTalk titles its window. It used to come out as a `chat-<id>` group,
   which `send --chat` could not match to a window.
+- `katok sync --incremental` reads each KakaoTalk database only past the
+  cursors the previous sync stored: its eight newest local `NTChatMessage`
+  rows, each as rowid plus `(chatId, logId)`. The read starts after the
+  newest of them that still holds the same message. The rowid is KakaoTalk's
+  insertion order, so a message the Mac receives late still lands after it.
+  When none holds (deleted, replaced, renumbered by a vacuum), or a database
+  has no cursor, that database is read in full. Every sync
+  stores the cursor inside its transaction; the report gains `incremental`
+  only with the flag. A message KakaoTalk edits in place, and the names of
+  rooms without new messages, wait for the next sync without the flag. It
+  cannot be combined with `--prune-preview`/`--prune-deleted`.
+- Auth hands the database key it already derived to the reader, the media
+  reader and the room-id lookup instead of deriving it again, derives the
+  database file name (used only to order probes) only when there is more
+  than one file, reads the katok auth cache before running `ioreg`, and runs
+  the two derivations side by side.
+- The account's newest-message time in `sync_cursors` no longer moves back
+  when a sync carries only an older message.
 
 ### Media
 
@@ -36,6 +59,10 @@
 - `tokio` is now part of the `semantic` feature too. A slim build drives the
   test embedder's futures with a single poll instead, so it no longer links a
   runtime (-258 KB).
+- On Apple Silicon `sha2` is built with its `asm` feature, which uses the
+  ARMv8 SHA-256 instructions (runtime-detected). A KakaoTalk key derivation
+  (100k PBKDF2-HMAC-SHA256 rounds) went from about 114 ms to 27 ms, and every
+  command that opens a KakaoTalk database does one or two.
 - New `sidecar` Cargo profile for the binary apps bundle: fat LTO, one codegen
   unit, `panic = "abort"`, symbols stripped. The slim build drops from 11.2 MB
   to 8.0 MB with `sync` and `rooms` as fast as before. `sidecar-symbols` keeps

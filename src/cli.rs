@@ -44,6 +44,15 @@ pub(crate) enum Commands {
         /// Each entry is `{chat_id, earliest_changed_timestamp, earliest_changed_message_id}`.
         #[arg(long)]
         touched: bool,
+        /// Read only what KakaoTalk added since the last sync of this archive.
+        ///
+        /// Each source database is read past the cursor the previous sync stored (its newest
+        /// local row), or in full when it has none or the cursor no longer matches. New and
+        /// replaced messages are seen; a message KakaoTalk edits in place, and room names of
+        /// rooms without new messages, wait for the next sync without this flag. Every sync
+        /// stores the cursor, so the first one after a full sync is already incremental.
+        #[arg(long, conflicts_with_all = ["prune_preview", "prune_deleted"])]
+        incremental: bool,
     },
     Index {
         /// Rebuild every vector instead of reusing unchanged vectors from the committed generation.

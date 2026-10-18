@@ -81,15 +81,19 @@ pub(crate) fn run(
             touched,
             prune_preview,
             prune_deleted,
+            incremental,
         } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
             run_sync(
                 &source,
                 path,
                 json,
-                touched,
-                prune_preview,
-                prune_deleted,
+                SyncOptions {
+                    include_touched: touched,
+                    prune_preview,
+                    prune_deleted,
+                    incremental,
+                },
                 &config,
                 &archive_path,
                 &data_dir,
@@ -409,28 +413,55 @@ fn macos_probe_payload(enabled: bool, data_dir: &Path) -> serde_json::Value {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The flags of `katok sync` besides where to read from.
+struct SyncOptions {
+    include_touched: bool,
+    prune_preview: bool,
+    prune_deleted: bool,
+    /// Read past the stored source cursors (`--incremental`). Never with a prune, which has
+    /// to see everything the source still holds (clap refuses the combination).
+    incremental: bool,
+}
+
 fn run_sync(
     source: &str,
     path: Option<PathBuf>,
     json: bool,
-    include_touched: bool,
-    prune_preview: bool,
-    prune_deleted: bool,
+    options: SyncOptions,
     config: &KatokConfig,
     archive_path: &Path,
     data_dir: &Path,
 ) -> Result<()> {
+    let SyncOptions {
+        include_touched,
+        prune_preview,
+        prune_deleted,
+        incremental,
+    } = options;
     let adapter = adapter_for_source(source, path, data_dir)?;
-    let read_started = Instant::now();
-    let messages = adapter.messages().context("read source messages")?;
-    let read_source = read_started.elapsed().as_millis();
     let archive = Archive::open(archive_path).context("open archive")?;
+    let cursors = if incremental {
+        archive
+            .source_cursors(source)
+            .context("read source cursors")?
+    } else {
+        Vec::new()
+    };
+    let read_started = Instant::now();
+    let read = adapter
+        .messages_since(&cursors)
+        .context("read source messages")?;
+    let messages = read.messages;
+    let read_source = read_started.elapsed().as_millis();
     // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
-    // messages are not a usable archive state, so either both land or neither does.
+    // messages are not a usable archive state, so either both land or neither does. The source
+    // cursors go in the same unit, so a failed sync reads the same range again next time.
     let report = archive.in_transaction(|| {
         let upsert_started = Instant::now();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
+        archive
+            .record_source_cursors(source, &read.cursors)
+            .context("record source cursors")?;
         let upsert_messages = upsert_started.elapsed().as_millis();
 
         // Before chunking, so a removed message never reaches a chunk. Inside
@@ -518,6 +549,7 @@ fn run_sync(
     let (mut report, pruned) = report;
     // Gate is output-only: the archive always computed touched_chats for the rebuild above.
     report.include_touched = include_touched;
+    report.incremental = incremental.then_some(read.incremental);
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
 
     if prune_preview || prune_deleted {

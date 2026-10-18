@@ -250,6 +250,8 @@ katok chunk get <chunk-id> --json
 
 sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가 실제로 바뀐 채팅방의 tail만 다시 계산하므로, 일반적인 append sync 비용은 전체 아카이브 크기보다 변경 범위에 가깝게 움직입니다. 전량을 다시 계산하는 경우는 세 가지입니다. 빈 아카이브에 처음 실행하는 sync, `chunk_gap_group_seconds`/`chunk_gap_direct_seconds` 를 바꾼 뒤 처음 실행하는 sync, 그리고 chunk 경계 규칙이 바뀐 버전으로 올린 뒤 처음 실행하는 sync 입니다. 이 버전을 기록하기 전에 만들어진 기존 아카이브도 여기 해당하므로 업그레이드 직후 sync 한 번은 전량을 다시 계산합니다. 그 뒤로는 다시 증분으로 돌아옵니다. 출력에 `rebuilt_chats`와 단계별 소요 시간(`timings_ms`의 `read_source`, `upsert_messages`, `rebuild_chunks`)이 포함되므로 느린 실행의 원인을 단계 단위로 확인할 수 있습니다.
 
+`katok sync --source macos --incremental --json`은 카카오톡 DB에서 지난 sync 뒤에 들어온 행만 읽습니다. 매 sync가 DB 파일마다 가장 최근 로컬 행 8개(`NTChatMessage`의 rowid와 그 행의 `chatId`·`logId`)를 아카이브에 남기고, 다음 증분 sync는 그 가운데 아직 같은 메시지를 가리키는 가장 최근 행 뒤부터 읽습니다. rowid는 보낸 시각이 아니라 이 맥에 저장된 순서라서, 맥이 잠들었다 깨어 늦게 받은 옛 메시지도 놓치지 않습니다. 남긴 행이 모두 지워졌거나 바뀌었거나(교체·VACUUM) 커서가 없는 DB는 전체를 읽습니다. 증분 sync는 새로 들어온 행과 교체된 행만 보므로, 카카오톡이 제자리에서 고친 메시지와 새 메시지가 없는 방의 이름 변경은 플래그 없는 다음 sync가 반영합니다. 출력에는 이 플래그를 줬을 때만 `incremental`(모든 DB를 커서 뒤부터 읽었는지)이 붙습니다. `--prune-preview`/`--prune-deleted`와 함께 쓸 수 없습니다.
+
 요구사항:
 
 - 터미널 앱이 `~/Library/Containers/com.kakao.KakaoTalkMac/` 아래 파일을 읽을 수 있도록 전체 디스크 접근 권한을 받아야 합니다.
@@ -307,6 +309,7 @@ katok send --chat <chat-id> --text "검토할 초안" --draft --accept-use-polic
 katok doctor --json
 katok source chats --source macos --json
 katok sync --source macos --json
+katok sync --source macos --incremental --json
 katok sync --json
 katok index --json
 katok search keyword "보고서" --json

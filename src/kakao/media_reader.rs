@@ -14,7 +14,7 @@ use super::media_paths::{
     album_full_stem, album_thumb_stem, photo_full_stem, photo_thumb_stem, video_full_stem,
 };
 use super::media_resolver::{MediaFrameInput, MediaKind};
-use super::{auth, derive, reader, AuthOptions};
+use super::{auth, reader, AuthOptions};
 use crate::Result;
 
 const PHOTO_MESSAGE_TYPE: i64 = 2;
@@ -72,12 +72,7 @@ pub fn read_media_frames_with_options(
     query: &MediaQuery,
 ) -> Result<Vec<MediaFrameInput>> {
     let resolved = auth::resolve_auth(options)?;
-    read_media_frames_from_databases(
-        &resolved.database_files,
-        resolved.user_id,
-        &resolved.uuid,
-        query,
-    )
+    read_media_frames_with_key(&resolved.database_files, &resolved.key, query)
 }
 
 pub fn read_media_frames_from_databases(
@@ -86,11 +81,23 @@ pub fn read_media_frames_from_databases(
     uuid: &str,
     query: &MediaQuery,
 ) -> Result<Vec<MediaFrameInput>> {
-    let key = derive::secure_key(user_id, uuid);
+    read_media_frames_with_key(
+        database_files,
+        &auth::DatabaseKey::derive(user_id, uuid),
+        query,
+    )
+}
+
+/// [`read_media_frames_from_databases`] with the key auth already derived.
+fn read_media_frames_with_key(
+    database_files: &[PathBuf],
+    key: &auth::DatabaseKey,
+    query: &MediaQuery,
+) -> Result<Vec<MediaFrameInput>> {
     let mut rows = Vec::new();
 
     for path in database_files {
-        let Ok(conn) = reader::open_database(path, &key) else {
+        let Ok(conn) = reader::open_database(path, key.as_str()) else {
             eprintln!("katok: skipping unreadable KakaoTalk db");
             continue;
         };
@@ -185,7 +192,7 @@ pub fn read_media_chat_ids_with_options(
     kinds: &[MediaKind],
 ) -> Result<Vec<i64>> {
     let resolved = auth::resolve_auth(options)?;
-    let key = derive::secure_key(resolved.user_id, &resolved.uuid);
+    let key = resolved.key.as_str();
     let query = MediaQuery {
         chat_id: 0,
         log_id: None,
@@ -201,7 +208,7 @@ pub fn read_media_chat_ids_with_options(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for path in &resolved.database_files {
-        let Ok(conn) = reader::open_database(path, &key) else {
+        let Ok(conn) = reader::open_database(path, key) else {
             eprintln!("katok: skipping unreadable KakaoTalk db");
             continue;
         };

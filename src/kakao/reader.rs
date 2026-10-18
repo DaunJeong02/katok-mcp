@@ -9,8 +9,9 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
+use super::auth::DatabaseKey;
 use super::bplist;
-use crate::types::RawMessage;
+use crate::types::{RawMessage, SourceCursor};
 use crate::{Error, Result};
 
 /// Output of reading one or more KakaoTalk databases.
@@ -18,7 +19,22 @@ use crate::{Error, Result};
 pub struct ReaderOutput {
     pub chats: Vec<ChatRecord>,
     pub messages: Vec<RawMessage>,
+    /// Where this read stopped in each database it read (the next incremental read starts
+    /// there).
+    pub cursors: Vec<SourceCursor>,
+    /// Every database was read from a cursor, not in full.
+    pub incremental: bool,
 }
+
+/// Rows before a cursor that an incremental read takes again. A valid cursor already covers
+/// every insert (a new row always gets a rowid above the newest existing one), so this is only
+/// margin; re-reading costs an unchanged upsert each.
+const CURSOR_OVERLAP_ROWS: i64 = 64;
+
+/// How many of the newest rows a read leaves as cursors for one database. The next read starts
+/// after the newest of them that still holds, so KakaoTalk replacing or deleting the very newest
+/// row (a status change, a deleted message) does not cost a full read.
+const CURSOR_ANCHORS: usize = 8;
 
 /// A chat room reduced to the fields katok needs.
 #[derive(Debug, Clone)]
@@ -411,6 +427,7 @@ fn read_one(
     user_id: i64,
     account: &str,
     users: &HashMap<i64, String>,
+    after_rowid: Option<i64>,
 ) -> Result<(HashMap<String, ChatRecord>, Vec<RawMessage>)> {
     let rooms = load_rooms(conn)?;
     // Resolve each room's display name once (peer/member joins need `users`),
@@ -425,11 +442,13 @@ fn read_one(
         })
         .collect();
 
+    // `rowid > -1` is every row: one statement either way, and the rowid range is the table's
+    // own key, so an incremental read touches only the new rows.
     let mut stmt = conn
         .prepare(
             "SELECT chatId, logId, authorId, type, message, sentAt, supplement, attachment
              FROM NTChatMessage
-             WHERE message IS NOT NULL AND message <> ''",
+             WHERE rowid > ?1 AND message IS NOT NULL AND message <> ''",
         )
         .map_err(Error::Sql)?;
 
@@ -437,7 +456,7 @@ fn read_one(
     let mut chats: HashMap<String, ChatRecord> = HashMap::new();
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([after_rowid.unwrap_or(-1)], |row| {
             let chat_id: i64 = row.get(0)?;
             let log_id: i64 = row.get(1)?;
             let author_id: i64 = row.get(2)?;
@@ -548,16 +567,97 @@ pub fn read_databases(
     user_id: i64,
     uuid: &str,
 ) -> Result<ReaderOutput> {
-    let key = super::derive::secure_key(user_id, uuid);
+    read_databases_with_key(
+        database_files,
+        user_id,
+        &DatabaseKey::derive(user_id, uuid),
+        &[],
+    )
+}
+
+/// Stable id of a database file for [`SourceCursor::db`]: a hash of the file name, which is
+/// itself derived from the account and is never stored or printed.
+pub fn database_id(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let digest = Sha256::digest(name.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The newest [`CURSOR_ANCHORS`] `NTChatMessage` rows, newest first: where a read of this
+/// snapshot stops.
+fn newest_rows(conn: &Connection, db: &str) -> Result<Vec<SourceCursor>> {
+    let mut stmt = conn
+        .prepare("SELECT rowid, chatId, logId FROM NTChatMessage ORDER BY rowid DESC LIMIT ?1")
+        .map_err(Error::Sql)?;
+    let rows = stmt
+        .query_map([CURSOR_ANCHORS as i64], |row| {
+            Ok(SourceCursor {
+                db: db.to_string(),
+                rowid: row.get(0)?,
+                chat_id: row.get(1)?,
+                log_id: row.get(2)?,
+            })
+        })
+        .map_err(Error::Sql)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Error::Sql)
+}
+
+/// Where an incremental read of `db` starts: after the newest of its cursors that still holds,
+/// less the overlap. `None` (read everything) when none holds or it has none.
+fn read_start(conn: &Connection, db: &str, cursors: &[SourceCursor]) -> Option<i64> {
+    let mut mine: Vec<&SourceCursor> = cursors.iter().filter(|c| c.db == db).collect();
+    mine.sort_by(|a, b| b.rowid.cmp(&a.rowid));
+    mine.into_iter()
+        .find(|c| cursor_holds(conn, c))
+        .map(|c| (c.rowid - CURSOR_OVERLAP_ROWS).max(0))
+}
+
+/// Whether `cursor` still marks the same message: the row at its rowid must be the one it
+/// recorded. A renumbered table (`VACUUM`), a deleted or replaced row, or a different database
+/// all fail this; when no cursor of a database holds, it is read in full.
+fn cursor_holds(conn: &Connection, cursor: &SourceCursor) -> bool {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT chatId, logId FROM NTChatMessage WHERE rowid = ?1",
+        [cursor.rowid],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+        == Some((cursor.chat_id, cursor.log_id))
+}
+
+/// [`read_databases`] with the key auth already derived, reading each database only past its
+/// cursor in `cursors` when that cursor still holds ([`cursor_holds`]); a database without one
+/// is read in full. Empty `cursors` is a full read. Either way the output carries the cursors
+/// where this read stopped.
+///
+/// An incremental read sees new and replaced rows only. A row KakaoTalk changes in place keeps
+/// its rowid and is picked up by the next full read.
+pub fn read_databases_with_key(
+    database_files: &[PathBuf],
+    user_id: i64,
+    key: &DatabaseKey,
+    cursors: &[SourceCursor],
+) -> Result<ReaderOutput> {
     let account = account_hash(user_id);
 
     // Open each DB once. A DB that fails to open is skipped with a one-line
     // warning (filename only, never content), mirroring the per-row degrade.
     let mut openable: Vec<(&PathBuf, Connection)> = Vec::new();
+    let mut skipped = false;
     for path in database_files {
-        match open_database(path, &key) {
+        match open_database(path, key.as_str()) {
             Ok(conn) => openable.push((path, conn)),
-            Err(_) => eprintln!("{}", unreadable_database_warning()),
+            Err(_) => {
+                eprintln!("{}", unreadable_database_warning());
+                skipped = true;
+            }
         }
     }
 
@@ -576,18 +676,38 @@ pub fn read_databases(
 
     let mut chats: HashMap<String, ChatRecord> = HashMap::new();
     let mut messages_by_id: HashMap<String, RawMessage> = HashMap::new();
+    let mut stopped: Vec<SourceCursor> = Vec::new();
+    let mut incremental = !openable.is_empty() && !skipped;
 
-    for (_, conn) in &openable {
-        // A read_one failure on one DB (e.g. a schema mismatch in a secondary
-        // store) must not abort messages already gathered from a healthy DB:
-        // log a one-line warning (filename only) and skip this DB.
-        let (db_chats, db_messages) = match read_one(conn, user_id, &account, &users) {
-            Ok(result) => result,
+    for (path, conn) in &openable {
+        let db = database_id(path);
+        // One read transaction per database, so the cursor and the rows come from the same
+        // snapshot: a message KakaoTalk writes meanwhile is either in both or in neither.
+        let snapshot = match conn.unchecked_transaction() {
+            Ok(tx) => tx,
             Err(_) => {
                 eprintln!("{}", unreadable_database_warning());
+                incremental = false;
                 continue;
             }
         };
+        let newest = newest_rows(conn, &db).unwrap_or_default();
+        let after = read_start(conn, &db, cursors);
+        incremental &= after.is_some();
+        // A read_one failure on one DB (e.g. a schema mismatch in a secondary
+        // store) must not abort messages already gathered from a healthy DB:
+        // log a one-line warning (filename only) and skip this DB.
+        let read = read_one(conn, user_id, &account, &users, after);
+        drop(snapshot);
+        let (db_chats, db_messages) = match read {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("{}", unreadable_database_warning());
+                incremental = false;
+                continue;
+            }
+        };
+        stopped.extend(newest);
         for (chat_id, record) in db_chats {
             chats.entry(chat_id).or_insert(record);
         }
@@ -612,6 +732,8 @@ pub fn read_databases(
     Ok(ReaderOutput {
         chats: chat_list,
         messages,
+        cursors: stopped,
+        incremental,
     })
 }
 

@@ -36,6 +36,26 @@ pub struct SyncReport {
     pub touched_chats: Vec<TouchedChat>,
     /// Gate for JSON emission of `touched_chats`. Default false.
     pub include_touched: bool,
+    /// `katok sync --incremental` only: whether every source database was read from its cursor
+    /// (`false` when one had none or a stale one and was read in full). Omitted otherwise, so the
+    /// default JSON shape is unchanged.
+    pub incremental: Option<bool>,
+}
+
+/// Where the last sync stopped in one source database: one of the newest `NTChatMessage` rows it
+/// saw (a sync leaves several per database), by rowid plus that row's `(chatId, logId)`, so a
+/// table renumbered underneath it (a `VACUUM`) or a row that was replaced is noticed. The next
+/// sync starts after the newest one that still holds, or reads the database in full.
+///
+/// The rowid is KakaoTalk's local insertion order, not the send time, so a message the Mac only
+/// receives later (after sleep, or offline) still lands after the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCursor {
+    /// Stable id of the database file: a hash of its file name, never the name itself.
+    pub db: String,
+    pub rowid: i64,
+    pub chat_id: i64,
+    pub log_id: i64,
 }
 
 impl Serialize for SyncReport {
@@ -45,7 +65,8 @@ impl Serialize for SyncReport {
     {
         use serde::ser::SerializeStruct;
         // Field order matches the historical derive order so flag-off output stays byte-identical.
-        let field_count = 6 + usize::from(self.include_touched);
+        let field_count =
+            6 + usize::from(self.include_touched) + usize::from(self.incremental.is_some());
         let mut state = serializer.serialize_struct("SyncReport", field_count)?;
         state.serialize_field("inserted_messages", &self.inserted_messages)?;
         state.serialize_field("updated_messages", &self.updated_messages)?;
@@ -55,6 +76,9 @@ impl Serialize for SyncReport {
         state.serialize_field("timings_ms", &self.timings_ms)?;
         if self.include_touched {
             state.serialize_field("touched_chats", &self.touched_chats)?;
+        }
+        if let Some(incremental) = self.incremental {
+            state.serialize_field("incremental", &incremental)?;
         }
         state.end()
     }
@@ -108,6 +132,7 @@ mod tests {
                 earliest_changed_message_id: "m1".into(),
             }],
             include_touched,
+            incremental: None,
         }
     }
 

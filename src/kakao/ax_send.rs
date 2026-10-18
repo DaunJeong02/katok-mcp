@@ -497,8 +497,17 @@ fn front_then<T>(pid: i32, action: impl FnOnce() -> T) -> Result<T, SendError> {
     Err(SendError::FocusLost)
 }
 
-/// How long a window raise is given to settle before its focus is read back.
+/// Longest a window raise is given to take before the caller reads focus back itself. The wait
+/// ends as soon as the window reads back as the app's focused window, which is the condition
+/// every keystroke after a raise is checked against anyway ([`keystroke_may_post`]).
 const WINDOW_RAISE_SETTLE: Duration = Duration::from_millis(200);
+/// How often a raise is read back while waiting for it.
+const RAISE_POLL: Duration = Duration::from_millis(20);
+/// Before a chat-list row is clicked: the list has to be on top at the row's screen position.
+/// Once it reads back as the focused window the click still waits this long for the window
+/// server to restack, and never longer than [`LIST_RAISE_MAX`] in all (the old fixed wait).
+const LIST_RAISE_MIN: Duration = Duration::from_millis(150);
+const LIST_RAISE_MAX: Duration = Duration::from_millis(300);
 
 /// Make `window` the app's key window: raise it and, where the window supports
 /// it, mark it main.
@@ -508,7 +517,7 @@ const WINDOW_RAISE_SETTLE: Duration = Duration::from_millis(200);
 /// chat windows open, a Cmd+V aimed at one room would paste into another.
 /// `AXMain` is not settable on every window, so its result is not checked here;
 /// the focused-window check before the keystroke is what decides.
-fn raise_window(window: &AxRef) {
+fn raise_window(pid: i32, window: &AxRef) {
     let raise = CFString::new(ACTION_RAISE);
     unsafe { AXUIElementPerformAction(window.as_raw(), raise.as_concrete_TypeRef()) };
     let main = CFString::new(ATTR_MAIN);
@@ -520,7 +529,22 @@ fn raise_window(window: &AxRef) {
             yes.as_CFTypeRef(),
         )
     };
-    std::thread::sleep(WINDOW_RAISE_SETTLE);
+    wait_until_focused(pid, window, WINDOW_RAISE_SETTLE);
+}
+
+/// Wait up to `limit` for `window` to read back as `pid`'s focused window. Returns whether it
+/// did; a caller that needs it checks again at the moment it acts.
+fn wait_until_focused(pid: i32, window: &AxRef, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        if focused_window(pid).is_some_and(|focused| focused == *window) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(RAISE_POLL);
+    }
 }
 
 /// The application's focused (key) window, if it reports one.
@@ -1155,7 +1179,7 @@ pub fn send_image_to_open_window(
     )?;
     // The app being frontmost is not enough: Cmd+V goes to its key window,
     // which with several chats open may be a different room.
-    raise_window(&window);
+    raise_window(pid, &window);
 
     if let Some(compose) = compose_box(window.as_raw()) {
         let focus_key = CFString::new(ATTR_FOCUSED);
@@ -1432,11 +1456,18 @@ fn open_row_by_click(
 ) -> Result<(), SendError> {
     // A click lands on whatever window is on top at those coordinates, so the list has to be
     // raised above any chat windows before aiming at it.
-    if let Some(main) = main_window(windows) {
-        let raise = CFString::new(ACTION_RAISE);
-        unsafe { AXUIElementPerformAction(main.as_raw(), raise.as_concrete_TypeRef()) };
+    let raised = Instant::now();
+    match main_window(windows) {
+        Some(main) => {
+            let raise = CFString::new(ACTION_RAISE);
+            unsafe { AXUIElementPerformAction(main.as_raw(), raise.as_concrete_TypeRef()) };
+            if wait_until_focused(pid, main, LIST_RAISE_MAX) {
+                let left = LIST_RAISE_MAX.saturating_sub(raised.elapsed());
+                std::thread::sleep(LIST_RAISE_MIN.min(left));
+            }
+        }
+        None => std::thread::sleep(LIST_RAISE_MAX),
     }
-    std::thread::sleep(Duration::from_millis(300));
 
     // Re-confirm after the raise settled: the click is about to be posted to
     // screen coordinates, and if the user grabbed focus back it would land in
@@ -1542,7 +1573,7 @@ fn open_room_via_search(
     // window. With a chat window key they would land in that room's compose box,
     // so the chat list is raised first and the keystrokes are only posted once it
     // is confirmed to be the focused window.
-    raise_window(main);
+    raise_window(pid, main);
     // Focus first: typing goes wherever the app thinks focus is.
     let focus_key = CFString::new(ATTR_FOCUSED);
     let yes = core_foundation::boolean::CFBoolean::true_value();
@@ -1661,12 +1692,16 @@ fn clear_search(windows: &[AxRef]) {
                 empty.as_CFTypeRef(),
             )
         };
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        if attr_string(field.as_raw(), ATTR_VALUE)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            return;
+        // Read back every 30 ms for the same 150 ms per write: the box usually reads empty on
+        // the first look, and the opened room waits for this.
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            if attr_string(field.as_raw(), ATTR_VALUE)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                return;
+            }
         }
     }
 }
@@ -1897,7 +1932,7 @@ pub fn send_to_open_window(
     // their input, and only if KakaoTalk verifiably comes forward. A global Enter fired while
     // the user is back in their own app would submit whatever they were in the middle of.
     let _hold = take_screen(pid, ctx, &format!("{} 로 전송 중", target.name))?;
-    raise_window(&window);
+    raise_window(pid, &window);
     let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {
         AXUIElementSetAttributeValue(
@@ -1975,7 +2010,7 @@ pub fn draft_to_open_window(
     let _hold = take_screen(pid, ctx, &format!("{} 초안 작성 중", target.name))?;
     // Cmd+V goes to the key window, not to whichever window was resolved, so
     // the draft room has to be made key first and checked again before the paste.
-    raise_window(&window);
+    raise_window(pid, &window);
     let focus_key = CFString::new(ATTR_FOCUSED);
     let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {

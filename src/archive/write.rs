@@ -1,7 +1,7 @@
 use super::model::DeletedMessage;
 use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
-    types::{RawMessage, SyncReport, TouchedChat},
+    types::{RawMessage, SourceCursor, SyncReport, TouchedChat},
     Error, Result,
 };
 use chrono::{DateTime, Utc};
@@ -235,6 +235,8 @@ impl Archive {
             touched_chats,
             // CLI sets this when `sync --touched` is requested; keep default off for byte-compat.
             include_touched: false,
+            // CLI sets this for `sync --incremental`.
+            incremental: None,
         })
     }
 
@@ -418,14 +420,77 @@ impl Archive {
             .map_err(Error::Sql)
     }
 
+    /// Never moves back: an incremental sync can carry only an older message the Mac received
+    /// late, and that must not rewind the newest time already seen. RFC3339 in UTC compares as
+    /// text.
     fn update_cursor(&self, source_id: &str, newest: &DateTime<Utc>) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO sync_cursors(source_id, cursor_value)
-             VALUES (?1, ?2)",
+                "INSERT INTO sync_cursors(source_id, cursor_value) VALUES (?1, ?2)
+                 ON CONFLICT(source_id) DO UPDATE SET
+                     cursor_value = max(cursor_value, excluded.cursor_value)",
                 params![source_id, newest.to_rfc3339()],
             )
             .map_err(Error::Sql)?;
+        Ok(())
+    }
+
+    /// Where the last sync of `source` stopped in each of its databases (see [`SourceCursor`]).
+    /// A value this build cannot parse is skipped, so that database is read in full.
+    pub fn source_cursors(&self, source: &str) -> Result<Vec<SourceCursor>> {
+        let prefix = source_cursor_prefix(source);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source_id, cursor_value FROM sync_cursors
+                 WHERE substr(source_id, 1, length(?1)) = ?1",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(params![prefix], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(Error::Sql)?;
+        let mut cursors = Vec::new();
+        for row in rows {
+            let (id, value) = row.map_err(Error::Sql)?;
+            // `<db>/<rowid>`; the database id is the part before the slash.
+            let db = id[prefix.len()..].split('/').next().unwrap_or_default();
+            if let Some(cursor) = parse_source_cursor(db, &value) {
+                cursors.push(cursor);
+            }
+        }
+        Ok(cursors)
+    }
+
+    /// Stores where this sync stopped, inside the caller's transaction so a sync that fails
+    /// after reading leaves the previous cursors, and the next sync reads that range again. A
+    /// database's cursors replace all its earlier ones; a database this sync did not read keeps
+    /// its own.
+    pub fn record_source_cursors(&self, source: &str, cursors: &[SourceCursor]) -> Result<()> {
+        let prefix = source_cursor_prefix(source);
+        let dbs: HashSet<&str> = cursors.iter().map(|c| c.db.as_str()).collect();
+        for db in dbs {
+            self.conn
+                .execute(
+                    "DELETE FROM sync_cursors
+                     WHERE source_id = ?1 OR substr(source_id, 1, length(?2)) = ?2",
+                    params![format!("{prefix}{db}"), format!("{prefix}{db}/")],
+                )
+                .map_err(Error::Sql)?;
+        }
+        for cursor in cursors {
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO sync_cursors(source_id, cursor_value)
+                     VALUES (?1, ?2)",
+                    params![
+                        format!("{prefix}{}/{}", cursor.db, cursor.rowid),
+                        format!("{}:{}:{}", cursor.rowid, cursor.chat_id, cursor.log_id)
+                    ],
+                )
+                .map_err(Error::Sql)?;
+        }
         Ok(())
     }
 
@@ -700,4 +765,22 @@ impl Archive {
         }
         Ok(())
     }
+}
+
+/// `sync_cursors.source_id` prefix of the per-database rowid cursors of `source`, each stored as
+/// `<prefix><db>/<rowid>`. The account-time cursor rows are keyed by the 64-hex account hash,
+/// which never has this shape.
+fn source_cursor_prefix(source: &str) -> String {
+    format!("{source}-rowid:")
+}
+
+fn parse_source_cursor(db: &str, value: &str) -> Option<SourceCursor> {
+    let mut parts = value.split(':');
+    let cursor = SourceCursor {
+        db: db.to_string(),
+        rowid: parts.next()?.parse().ok()?,
+        chat_id: parts.next()?.parse().ok()?,
+        log_id: parts.next()?.parse().ok()?,
+    };
+    (parts.next().is_none() && !db.is_empty()).then_some(cursor)
 }
