@@ -55,7 +55,7 @@ pub fn probe_status(home: &Path, data_dir: &Path) -> ProbeStatus {
     let container = container_dir(home);
     let container_present = container.is_dir();
     let db_file_count = if container_present {
-        discover_database_files(&container).len()
+        discover_database_files(&container).map_or(0, |files| files.len())
     } else {
         0
     };
@@ -184,23 +184,33 @@ fn preference_paths(home: &Path) -> Vec<PathBuf> {
 }
 
 /// DB files in the container dir matching `^[0-9a-f]{78}(?:\.db)?$`.
-pub fn discover_database_files(container: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(container) {
-        // Name first: the container holds many other files, and the name test needs no stat.
-        Ok(entries) => entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(is_hex_db_name)
-            })
-            .filter(|path| path.is_file())
-            .collect(),
-        Err(_) => Vec::new(),
+///
+/// A missing container is an empty list. Any other failure to list it (permission
+/// denied, interrupted call, ...) is an error carrying the OS error, so a blocked
+/// directory is not reported as "no database files".
+pub fn discover_database_files(container: &Path) -> Result<Vec<PathBuf>> {
+    let unreadable =
+        |err: std::io::Error| Error::Kakao(format!("container directory could not be read: {err}"));
+    let entries = match std::fs::read_dir(container) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(unreadable(err)),
     };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(unreadable)?.path();
+        // Name first: the container holds many other files, and the name test needs no stat.
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_hex_db_name)
+            && path.is_file()
+        {
+            files.push(path);
+        }
+    }
     files.sort();
-    files
+    Ok(files)
 }
 
 fn is_hex_db_name(name: &str) -> bool {
@@ -522,7 +532,7 @@ fn from_katok_cache(cache: &Path, database_files: &[PathBuf]) -> Option<Resolved
 /// Resolve and verify auth following the documented precedence chain.
 pub fn resolve_auth(options: &AuthOptions) -> Result<ResolvedAuth> {
     let container = container_dir(&options.home);
-    let database_files = discover_database_files(&container);
+    let database_files = discover_database_files(&container)?;
     if database_files.is_empty() {
         return Err(Error::Kakao(
             "no KakaoTalk database files found in the container directory".to_string(),
@@ -677,12 +687,46 @@ mod tests {
     }
 
     #[test]
+    fn missing_container_is_an_empty_list() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let found = discover_database_files(&dir.path().join("absent")).expect("missing is ok");
+        assert!(found.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_container_is_an_error_not_an_empty_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let container = dir.path().join("container");
+        std::fs::create_dir(&container).expect("container");
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod");
+        let outcome = discover_database_files(&container);
+        // Restore so the temp dir can be removed.
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755))
+            .expect("restore");
+        if std::fs::read_dir(&container).is_ok() && outcome.is_ok() {
+            // Running as root: permissions are not enforced, nothing to assert.
+            return;
+        }
+        let message = outcome
+            .expect_err("permission denied must surface")
+            .to_string();
+        assert!(
+            message.contains("container directory could not be read"),
+            "{message}"
+        );
+        assert!(message.contains("os error 13"), "{message}");
+    }
+
+    #[test]
     fn discovers_db_suffixed_file() {
         let dir = tempfile::tempdir().expect("temp dir");
         let stem = "a".repeat(78);
         let suffixed = dir.path().join(format!("{stem}.db"));
         std::fs::write(&suffixed, b"x").expect("write db file");
-        let found = discover_database_files(dir.path());
+        let found = discover_database_files(dir.path()).expect("list container");
         assert_eq!(found, vec![suffixed]);
     }
 
