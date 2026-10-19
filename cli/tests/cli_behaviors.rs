@@ -48,6 +48,64 @@ fn cli_send_requires_use_policy_acceptance_before_ui_access() {
         .stderr(predicate::str::contains("KakaoTalk is not running").not());
 }
 
+// The two tests below never pass `--accept-use-policy`. If the flag conflict ever stopped
+// being refused at parse time, the run would still end at the policy refusal, before any
+// room is resolved or any window is touched.
+#[cfg(all(target_os = "macos", feature = "private-send"))]
+#[test]
+fn cli_send_refuses_draft_with_image_as_structured_json_error() {
+    let output = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "send",
+            "--room",
+            "Synthetic QA Room",
+            "--draft",
+            "--image",
+            "/nonexistent/synthetic.png",
+            "--json",
+        ])
+        .write_stdin("")
+        .output()
+        .expect("run katok");
+
+    assert_eq!(output.status.code(), Some(2), "argument errors exit 2");
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json error is a JSON document");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "invalid_arguments");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("--draft cannot be combined with --image"),
+        "{message}"
+    );
+    assert!(message.contains("only text can"), "{message}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("accept-use-policy"));
+}
+
+#[cfg(all(target_os = "macos", feature = "private-send"))]
+#[test]
+fn cli_send_refuses_draft_with_image_in_plain_text_without_json() {
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "send",
+            "--room",
+            "Synthetic QA Room",
+            "--draft",
+            "--image",
+            "/nonexistent/synthetic.png",
+        ])
+        .write_stdin("")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "--draft cannot be combined with --image",
+        ))
+        .stderr(predicate::str::contains("accept-use-policy").not());
+}
+
 #[test]
 fn cli_acceptance_preserves_empty_message_refusal() {
     Command::cargo_bin("katok")

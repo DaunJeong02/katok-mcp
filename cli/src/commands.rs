@@ -200,6 +200,11 @@ fn run_send(
     use katok::kakao::ax_send;
     use std::io::Read;
 
+    // clap already refuses this pair; the check stays because everything below picks the
+    // image branch first, which would send what the caller asked only to stage.
+    if draft && image.is_some() {
+        anyhow::bail!(crate::cli::DRAFT_WITH_IMAGE);
+    }
     if list_windows {
         let titles = ax_send::open_window_titles()?;
         return print_payload(json, &serde_json::json!({ "open_windows": titles }));

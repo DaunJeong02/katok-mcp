@@ -4,6 +4,13 @@
 
 ### Send
 
+- `send --draft --image` is refused at argument parsing with a sentence that says
+  why (an image cannot be left as a draft) and what to do instead, rather than
+  clap's generic conflict wording; `--draft --dry-run` gets the same treatment.
+  Under `--json` any argument error now comes back as the usual
+  `{"ok": false, "error": {...}}` document with code `invalid_arguments`
+  (exit status 2) instead of prose on stderr. The send path also checks the
+  pair itself, since its image branch ran ahead of the draft branch.
 - Pasting an image or a draft, and the global-Enter fallback for text, now
   raise the target chat window (`AXRaise`, plus `AXMain` where settable) and
   confirm it is KakaoTalk's `AXFocusedWindow` immediately before the

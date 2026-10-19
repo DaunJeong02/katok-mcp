@@ -1,6 +1,40 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// What to tell someone who passes `--draft` with `--image`.
+///
+/// A draft is pasted text left in the compose box for review; there is no path that stages an
+/// image the same way, and falling back to sending it would deliver something the caller asked
+/// to hold back. So the pair is refused instead of being resolved in favour of either flag.
+pub(crate) const DRAFT_WITH_IMAGE: &str = "--draft cannot be combined with --image: an image \
+    cannot be left as a draft, only text can. Drop --draft to send the image, or drop --image \
+    to stage a text draft.";
+
+/// What to tell someone who passes `--draft` with `--dry-run`.
+pub(crate) const DRAFT_WITH_DRY_RUN: &str = "--draft cannot be combined with --dry-run: a dry run \
+    stages and sends nothing, so there would be no draft to leave. Use --dry-run alone to check \
+    which room would be targeted.";
+
+/// A plain-language replacement for clap's wording when the flags in conflict are ones this
+/// CLI has a specific reason to refuse, or `None` to leave clap's message as it is.
+pub(crate) fn conflict_message(error: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ErrorKind};
+
+    if error.kind() != ErrorKind::ArgumentConflict {
+        return None;
+    }
+    let text = |kind| error.get(kind).map(|value| value.to_string());
+    let pair = [text(ContextKind::InvalidArg)?, text(ContextKind::PriorArg)?];
+    let names = |flag: &str| pair.iter().any(|arg| arg.starts_with(flag));
+    if names("--draft") && names("--image") {
+        Some(DRAFT_WITH_IMAGE.to_string())
+    } else if names("--draft") && names("--dry-run") {
+        Some(DRAFT_WITH_DRY_RUN.to_string())
+    } else {
+        None
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "katok", about = "katok: local KakaoTalk search CLI")]
 pub(crate) struct Cli {
@@ -172,8 +206,8 @@ pub(crate) enum Commands {
         /// Message body. Reads stdin when omitted.
         #[arg(long)]
         text: Option<String>,
-        /// Send an image file instead of text. Mutually exclusive with --text.
-        #[arg(long, conflicts_with = "text")]
+        /// Send an image file instead of text. Mutually exclusive with --text and --draft.
+        #[arg(long, conflicts_with_all = ["text", "draft"])]
         image: Option<PathBuf>,
         /// List the chat windows currently open and exit without sending.
         #[arg(long)]
@@ -194,7 +228,8 @@ pub(crate) enum Commands {
         /// Leave the message in the compose box for review instead of sending it.
         ///
         /// Pasted rather than typed, so nothing is delivered until a person presses Enter.
-        /// Needs the screen for a moment, like sending an image does.
+        /// Needs the screen for a moment, like sending an image does. Text only: it cannot be
+        /// combined with --image, and an image is never staged as a draft.
         #[arg(long, conflicts_with_all = ["image", "dry_run"])]
         draft: bool,
         /// Take focus immediately instead of waiting for a gap in your typing.
@@ -362,6 +397,54 @@ pub(crate) enum PermissionsCommand {
 #[cfg(all(test, target_os = "macos", feature = "private-send"))]
 mod tests {
     use super::*;
+
+    fn parse_error(args: &[&str]) -> clap::Error {
+        match Cli::try_parse_from(args) {
+            Ok(_) => panic!("{args:?} should have been rejected at parse time"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn send_draft_with_image_is_rejected_at_parse_time() {
+        // Either order: the conflict is symmetric, so the image can never be sent by a command
+        // that also asked for a draft.
+        for args in [
+            [
+                "katok", "send", "--room", "r", "--draft", "--image", "x.png",
+            ],
+            [
+                "katok", "send", "--room", "r", "--image", "x.png", "--draft",
+            ],
+        ] {
+            let error = parse_error(&args);
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            assert_eq!(
+                conflict_message(&error).as_deref(),
+                Some(DRAFT_WITH_IMAGE),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn send_draft_with_dry_run_is_rejected_with_its_own_message() {
+        let error = parse_error(&["katok", "send", "--room", "r", "--draft", "--dry-run"]);
+        assert_eq!(
+            conflict_message(&error).as_deref(),
+            Some(DRAFT_WITH_DRY_RUN)
+        );
+    }
+
+    #[test]
+    fn send_draft_and_image_each_parse_alone() {
+        for args in [
+            ["katok", "send", "--room", "r", "--draft", "--text", "hi"],
+            ["katok", "send", "--room", "r", "--image", "x.png", "--json"],
+        ] {
+            Cli::try_parse_from(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        }
+    }
 
     #[test]
     fn send_listing_modes_parse_without_target() {
