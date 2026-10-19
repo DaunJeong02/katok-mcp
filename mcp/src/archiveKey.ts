@@ -6,10 +6,10 @@
  * The key value never appears in logs, errors, or tool results. Only its source does.
  */
 
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type KeychainReader, readKeychain } from "./keychain.js";
+import { KeychainNotFoundError, type KeychainReader, readKeychain } from "./keychain.js";
 import type { Env } from "./paths.js";
 
 export const ARCHIVE_KEY_ENV = "KATOK_ARCHIVE_KEY";
@@ -43,26 +43,57 @@ export function keychainTarget(env: Env): KeychainTarget | null {
   };
 }
 
+/** How long "the Keychain has no such item" is remembered, so a missing item does not re-prompt on every call. */
+export const NOT_FOUND_TTL_MS = 30_000;
+
 /**
- * Create a resolver that reads the Keychain at most once per process and caches the outcome,
- * success or failure, so a denied dialog is not raised again on every tool call.
+ * Create a resolver for the Keychain key. Only a successful lookup is cached for the life of
+ * the process. "Item not found" is remembered for NOT_FOUND_TTL_MS. Every other failure (a
+ * denied dialog, a timeout, a locked Keychain) is never cached, so the next call asks again
+ * instead of running katok keyless for the rest of the process. Concurrent calls share one
+ * lookup. `now` is injectable for tests.
  */
-export function createKeyProvider(reader: KeychainReader = readKeychain) {
-  let cached: Promise<KeyResolution> | null = null;
+export function createKeyProvider(
+  reader: KeychainReader = readKeychain,
+  now: () => number = Date.now,
+) {
+  interface Entry {
+    service: string;
+    account: string;
+    resolution: KeyResolution;
+    /** Epoch ms after which the entry is stale, or null for "until reset()". */
+    expiresAt: number | null;
+  }
+  let cached: Entry | null = null;
+  let inflight: { service: string; account: string; promise: Promise<KeyResolution> } | null = null;
+  let generation = 0;
 
   async function lookup(target: KeychainTarget): Promise<KeyResolution> {
+    const mine = generation;
+    const remember = (resolution: KeyResolution, ttlMs: number | null) => {
+      if (mine !== generation) return resolution; // reset() ran meanwhile: this answer may be stale
+      cached = {
+        ...target,
+        resolution,
+        expiresAt: ttlMs === null ? null : now() + ttlMs,
+      };
+      return resolution;
+    };
     try {
       const key = (await reader(target.service, target.account)).trim();
       if (key.length === 0) {
         return { source: "none", reason: "keychain item is empty" };
       }
-      return { source: "keychain", key };
+      return remember({ source: "keychain", key }, null);
     } catch (error) {
       const why = error instanceof Error ? error.message : String(error);
-      return {
+      const resolution: KeyResolution = {
         source: "none",
         reason: `keychain lookup (service ${target.service}, account ${target.account}) failed: ${why}`,
       };
+      return error instanceof KeychainNotFoundError
+        ? remember(resolution, NOT_FOUND_TTL_MS)
+        : resolution;
     }
   }
 
@@ -72,13 +103,28 @@ export function createKeyProvider(reader: KeychainReader = readKeychain) {
     if (target === null) {
       return { source: "none", reason: "keychain lookup disabled by KATOK_MCP_KEYCHAIN=0" };
     }
-    cached ??= lookup(target);
-    return cached;
+    const same = (entry: { service: string; account: string }) =>
+      entry.service === target.service && entry.account === target.account;
+    if (
+      cached !== null &&
+      same(cached) &&
+      (cached.expiresAt === null || now() < cached.expiresAt)
+    ) {
+      return cached.resolution;
+    }
+    if (inflight !== null && same(inflight)) return inflight.promise;
+    const promise = lookup(target).finally(() => {
+      if (inflight?.promise === promise) inflight = null;
+    });
+    inflight = { ...target, promise };
+    return promise;
   }
 
-  /** Forget the cached outcome. katok_init calls this after it stores a new key. */
+  /** Forget everything cached. katok_init calls this once the Keychain holds the key. */
   function reset(): void {
+    generation += 1;
     cached = null;
+    inflight = null;
   }
 
   return Object.assign(resolve, { reset });
@@ -174,4 +220,46 @@ export function plaintextGuard(
     return `${PLAINTEXT_REFUSAL} (${archive})`;
   }
   return null;
+}
+
+/** Subcommand words after katok's leading global flags, e.g. ["send", "--list-windows", "--json"]. */
+export function commandArgs(args: readonly string[]): string[] {
+  let index = 0;
+  while (index < args.length && (args[index] ?? "").startsWith("--")) {
+    // Only --data-dir takes a separate value among the global flags this server passes.
+    index += args[index] === "--data-dir" ? 2 : 1;
+  }
+  return args.slice(index);
+}
+
+/** Commands that never open (and so never create) the archive. */
+export function opensArchive(args: readonly string[]): boolean {
+  const [command, ...rest] = commandArgs(args);
+  if (command === "doctor" || command === "permissions") return false;
+  if (command === "send" && (rest.includes("--list-windows") || rest.includes("--list-rooms"))) {
+    return false;
+  }
+  return true;
+}
+
+export const NO_KEY_NO_ARCHIVE =
+  "아카이브(archive.sqlite3)가 아직 없고 아카이브 키도 없어 실행하지 않았습니다. katok은 파일이 없으면 평문 아카이브를 새로 만듭니다. katok_init을 먼저 실행하세요 (run katok_init first; it creates the Keychain key and the encrypted archive, or set KATOK_ARCHIVE_KEY).";
+
+/**
+ * Refuse to start a command that would make katok create a brand-new plaintext archive: no key
+ * to encrypt it with (neither KATOK_ARCHIVE_KEY nor a readable Keychain item) and no archive
+ * file yet. Commands that never open the archive pass. An explicit KATOK_ARCHIVE_KEY passes.
+ *
+ * Returns null when the call may proceed, or the refusal message (never containing a key).
+ */
+export function missingArchiveGuard(
+  resolution: KeyResolution,
+  args: readonly string[],
+  exists: (file: string) => boolean = existsSync,
+): string | null {
+  if (resolution.source !== "none" || !opensArchive(args)) return null;
+  const archive = path.join(dataDirFromArgs(args), "archive.sqlite3");
+  if (exists(archive)) return null;
+  const why = resolution.reason ? ` (${resolution.reason})` : "";
+  return `${NO_KEY_NO_ARCHIVE}${why} [${archive}]`;
 }

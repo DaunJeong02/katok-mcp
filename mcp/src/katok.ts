@@ -15,6 +15,7 @@ import {
   isWrongKeyFailure,
   KEY_HINT,
   type KeyResolution,
+  missingArchiveGuard,
   plaintextGuard,
   WRONG_KEY_HINT,
   withArchiveKey,
@@ -103,7 +104,7 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-/** One Keychain lookup per server process. */
+/** Keychain lookups: successes are cached per process, failures are retried (see createKeyProvider). */
 const archiveKey = createKeyProvider();
 
 /** Forget the cached Keychain lookup, e.g. after katok_init stored a new key. */
@@ -112,14 +113,15 @@ export function resetArchiveKey(): void {
 }
 
 /**
- * Run katok with KATOK_ARCHIVE_KEY supplied from the env or the Keychain. When no key is
- * available and katok fails on the encrypted archive, the error gains a hint and the reason
+ * Run katok with KATOK_ARCHIVE_KEY supplied from the env or the Keychain. With no key and no
+ * archive file, commands that would make katok create a plaintext archive are refused before
+ * katok starts. When no key is available and katok fails on the encrypted archive, the error gains a hint and the reason
  * the key is missing. The key itself never enters the error.
  */
 export async function runKatok(args: string[], options: RunOptions = {}): Promise<unknown> {
   const baseEnv = options.env ?? process.env;
   const resolution = await archiveKey(baseEnv);
-  const refusal = plaintextGuard(resolution, args);
+  const refusal = missingArchiveGuard(resolution, args) ?? plaintextGuard(resolution, args);
   if (refusal !== null) throw new Error(refusal);
   try {
     return await execKatok(args, withArchiveKey(baseEnv, resolution), options);

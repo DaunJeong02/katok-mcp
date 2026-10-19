@@ -2,8 +2,8 @@
  * macOS Keychain access through /usr/bin/security, plus archive key generation.
  *
  * The key is a secret: it must never reach an error message, a log line, or a tool result.
- * `execFile` errors embed the whole command line (including `-w <key>`), so the write path
- * builds its own messages from stderr and never from `error.message`.
+ * The write path hands the key to `security -i` on stdin (never argv, so not visible in `ps`) and
+ * builds its error messages from stderr, never from `error.message`.
  */
 
 import { execFile } from "node:child_process";
@@ -14,11 +14,21 @@ const KEY_PATTERN = /^[0-9a-f]{64}$/;
 
 /** `security` exits 44 and says "could not be found" when the item does not exist. */
 const NOT_FOUND_EXIT_CODE = 44;
+/** `security add-generic-password` without -U exits 45 when the item already exists. */
+const DUPLICATE_EXIT_CODE = 45;
 
 export class KeychainNotFoundError extends Error {
   constructor(service: string, account: string) {
     super(`keychain item (service ${service}, account ${account}) was not found`);
     this.name = "KeychainNotFoundError";
+  }
+}
+
+/** Thrown by the writer when the item already exists, e.g. a concurrent katok_init stored a key first. */
+export class KeychainDuplicateError extends Error {
+  constructor(service: string, account: string) {
+    super(`keychain item (service ${service}, account ${account}) already exists`);
+    this.name = "KeychainDuplicateError";
   }
 }
 
@@ -50,23 +60,77 @@ export const readKeychain: KeychainReader = (service, account) =>
     );
   });
 
-/** Store (or update, `-U`) one generic password. */
+/** Quote one argument for `security -i`'s command parser. Characters it cannot carry are refused. */
+function quoteForSecurity(label: string, value: string): string {
+  const unsafe = [...value].some((ch) => ch === '"' || ch === "\\" || ch.charCodeAt(0) < 0x20);
+  if (value.length === 0 || unsafe) {
+    throw new Error(
+      `keychain ${label} must be non-empty and free of quotes, backslashes and control characters`,
+    );
+  }
+  return `"${value}"`;
+}
+
+/**
+ * The one command line fed to `security -i` on stdin. The key travels over stdin, not argv, so
+ * it never shows up in `ps`. No `-U`: an existing item must not be overwritten.
+ */
+export function addCommandLine(service: string, account: string, key: string): string {
+  return [
+    "add-generic-password",
+    "-s",
+    quoteForSecurity("service", service),
+    "-a",
+    quoteForSecurity("account", account),
+    "-w",
+    quoteForSecurity("key", key),
+  ].join(" ");
+}
+
+/** Turn a failed `security -i add-generic-password` into an error that never holds the key. */
+export function addFailure(
+  service: string,
+  account: string,
+  key: string,
+  code: unknown,
+  stderr: string,
+): Error {
+  const text = stderr.replaceAll(key, "[redacted]").trim();
+  if (code === DUPLICATE_EXIT_CODE || /already exists/i.test(text)) {
+    return new KeychainDuplicateError(service, account);
+  }
+  return new Error(
+    `security add-generic-password failed: ${text || `exit code ${String(code ?? "unknown")}`}`,
+  );
+}
+
+/**
+ * Create one generic password through `security -i` (commands on stdin). Fails with
+ * KeychainDuplicateError when the item exists; it never updates one.
+ */
 export const writeKeychain: KeychainWriter = (service, account, key) =>
   new Promise((resolve, reject) => {
-    execFile(
+    let command: string;
+    try {
+      command = addCommandLine(service, account, key);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const child = execFile(
       "/usr/bin/security",
-      ["add-generic-password", "-s", service, "-a", account, "-w", key, "-U"],
+      ["-i"],
       { timeout: KEYCHAIN_TIMEOUT_MS, encoding: "utf8" },
       (error, _stdout, stderr) => {
         if (error) {
-          // Not error.message: it repeats the argv, which contains the key.
-          const text = String(stderr ?? "")
-            .replaceAll(key, "[redacted]")
-            .trim();
-          const code: unknown = (error as { code?: unknown }).code;
+          // Not error.message: it can repeat the command line.
           reject(
-            new Error(
-              `security add-generic-password failed: ${text || `exit code ${String(code ?? "unknown")}`}`,
+            addFailure(
+              service,
+              account,
+              key,
+              (error as { code?: unknown }).code,
+              String(stderr ?? ""),
             ),
           );
           return;
@@ -74,6 +138,10 @@ export const writeKeychain: KeychainWriter = (service, account, key) =>
         resolve();
       },
     );
+    child.stdin?.on("error", () => {
+      // security may exit before reading stdin; its exit status reports the outcome.
+    });
+    child.stdin?.end(`${command}\n`);
   });
 
 /** 32 random bytes as 64 lowercase hex characters, from `openssl rand -hex 32`. */

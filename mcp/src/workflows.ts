@@ -19,6 +19,7 @@ import {
 } from "./katok.js";
 import {
   generateArchiveKey,
+  KeychainDuplicateError,
   KeychainNotFoundError,
   type KeychainReader,
   type KeychainWriter,
@@ -121,11 +122,23 @@ export async function initialize(deps: InitDeps): Promise<InitResult> {
         );
       }
       const fresh = await deps.generateKey();
-      await deps.writeKey(target.service, target.account, fresh);
-      // A lookup cached before this point still says "no key"; the sync below must see the new one.
-      deps.resetKey();
-      key = { source: "keychain", created: true, ...target };
+      try {
+        await deps.writeKey(target.service, target.account, fresh);
+        key = { source: "keychain", created: true, ...target };
+      } catch (error) {
+        if (!(error instanceof KeychainDuplicateError)) throw error;
+        // A concurrent init stored a key between our read and write. Use that one, never ours.
+        const winner = (await deps.readKey(target.service, target.account)).trim();
+        if (winner.length === 0) {
+          throw new Error(
+            `키체인 항목(${where})이 동시에 만들어졌지만 비어 있습니다. 항목을 지우고(security delete-generic-password -s ${target.service} -a ${target.account}) katok_init을 다시 실행하세요.`,
+          );
+        }
+        key = { source: "keychain", created: false, ...target };
+      }
     }
+    // Every Keychain branch: a lookup cached before this point may still say "no key".
+    deps.resetKey();
   }
 
   deps.makeDir(dir);

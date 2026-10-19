@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  commandArgs,
   createKeyProvider,
   DEFAULT_KEYCHAIN_ACCOUNT,
   DEFAULT_KEYCHAIN_SERVICE,
@@ -12,9 +13,13 @@ import {
   isWrongKeyFailure,
   katokDefaultDataDir,
   keychainTarget,
+  missingArchiveGuard,
+  NOT_FOUND_TTL_MS,
+  opensArchive,
   plaintextGuard,
   withArchiveKey,
 } from "../dist/archiveKey.js";
+import { KeychainNotFoundError } from "../dist/keychain.js";
 
 const SECRET = "k".repeat(64);
 
@@ -90,21 +95,103 @@ describe("createKeyProvider", () => {
     assert.equal(withArchiveKey({ A: "1" }, first).KATOK_ARCHIVE_KEY, SECRET);
   });
 
-  it("caches a failure as 'none' with a reason that holds no key", async () => {
-    const { reader, calls } = fakeReader(new Error("item could not be found"));
+  it("never caches a failure other than 'not found': the next call asks again", async () => {
+    let attempt = 0;
+    const calls = [];
+    const reader = async (service, account) => {
+      calls.push({ service, account });
+      attempt += 1;
+      if (attempt === 1) throw new Error("User interaction is not allowed");
+      return SECRET;
+    };
     const resolve = createKeyProvider(reader);
-    const result = await resolve({});
+    const first = await resolve({});
+    assert.equal(first.source, "none");
+    assert.equal(first.key, undefined);
+    assert.match(first.reason, /User interaction is not allowed/);
+    assert.ok(!first.reason.includes(SECRET));
+    const second = await resolve({});
+    assert.equal(second.source, "keychain");
+    assert.equal(second.key, SECRET);
+    assert.equal(calls.length, 2);
+    // ...and the success is cached for good.
     await resolve({});
-    assert.equal(result.source, "none");
-    assert.equal(result.key, undefined);
-    assert.match(result.reason, /could not be found/);
+    assert.equal(calls.length, 2);
+  });
+
+  it("does not cache an empty item", async () => {
+    const { reader, calls } = fakeReader("  \n");
+    const resolve = createKeyProvider(reader);
+    await resolve({});
+    await resolve({});
+    assert.equal(calls.length, 2);
+  });
+
+  it("remembers 'not found' for 30 seconds only", async () => {
+    let clock = 1_000;
+    const calls = [];
+    const reader = async (service, account) => {
+      calls.push(1);
+      throw new KeychainNotFoundError(service, account);
+    };
+    const resolve = createKeyProvider(reader, () => clock);
+    assert.equal(NOT_FOUND_TTL_MS, 30_000);
+    const first = await resolve({});
+    assert.equal(first.source, "none");
+    assert.match(first.reason, /was not found/);
+    clock += NOT_FOUND_TTL_MS - 1;
+    assert.equal(await resolve({}), first);
     assert.equal(calls.length, 1);
+    clock += 1;
+    await resolve({});
+    assert.equal(calls.length, 2);
+  });
+
+  it("shares one lookup between concurrent calls", async () => {
+    let release;
+    const gate = new Promise((resolveGate) => {
+      release = resolveGate;
+    });
+    let count = 0;
+    const resolve = createKeyProvider(async () => {
+      count += 1;
+      await gate;
+      return SECRET;
+    });
+    const pending = [resolve({}), resolve({})];
+    release();
+    const [a, b] = await Promise.all(pending);
+    assert.equal(count, 1);
+    assert.equal(a.key, SECRET);
+    assert.equal(b.key, SECRET);
+  });
+
+  it("an answer that arrives after reset() is not cached", async () => {
+    let release;
+    const gate = new Promise((resolveGate) => {
+      release = resolveGate;
+    });
+    let count = 0;
+    const resolve = createKeyProvider(async (service, account) => {
+      count += 1;
+      if (count === 1) {
+        await gate;
+        throw new KeychainNotFoundError(service, account);
+      }
+      return SECRET;
+    });
+    const stale = resolve({});
+    resolve.reset();
+    release();
+    assert.equal((await stale).source, "none");
+    assert.equal((await resolve({})).key, SECRET);
+    assert.equal(count, 2);
   });
 
   it("reset() makes the next call read the Keychain again", async () => {
-    const { reader, calls } = fakeReader(new Error("item could not be found"));
+    const { reader, calls } = fakeReader(SECRET);
     const resolve = createKeyProvider(reader);
-    assert.equal((await resolve({})).source, "none");
+    assert.equal((await resolve({})).source, "keychain");
     resolve.reset();
     await resolve({});
     assert.equal(calls.length, 2);
@@ -185,5 +272,70 @@ describe("plaintextGuard", () => {
     // Without a --data-dir katok would use its own default, so that is what the guard checks.
     assert.equal(dataDirFromArgs(["rooms", "--json"]), katokDefaultDataDir());
     assert.ok(katokDefaultDataDir().endsWith("/Library/Application Support/katok"));
+  });
+});
+
+describe("missingArchiveGuard", () => {
+  const none = {
+    source: "none",
+    reason: "keychain lookup failed: User interaction is not allowed",
+  };
+  const args = (...rest) => ["--data-dir", "/tmp/katok-guard-test", ...rest];
+  const missing = () => false;
+  const present = () => true;
+
+  it("refuses an archive-opening command when there is no key and no archive file", () => {
+    for (const command of [
+      ["rooms", "--json"],
+      ["sync", "--source", "macos", "--json"],
+      ["search", "keyword", "--json", "--", "x"],
+      ["media", "backfill", "--out", "/tmp/o", "--json"],
+      ["send", "--chat", "1", "--dry-run", "--json"],
+    ]) {
+      const refusal = missingArchiveGuard(none, args(...command), missing);
+      assert.match(refusal, /katok_init/, command.join(" "));
+      assert.match(refusal, /User interaction is not allowed/);
+      assert.match(refusal, /\/tmp\/katok-guard-test\/archive\.sqlite3/);
+    }
+  });
+
+  it("lets doctor, permissions and the send listings through", () => {
+    for (const command of [
+      ["doctor", "--json"],
+      ["permissions", "macos"],
+      ["send", "--list-windows", "--json"],
+      ["send", "--list-rooms", "--json"],
+    ]) {
+      assert.equal(missingArchiveGuard(none, args(...command), missing), null, command.join(" "));
+    }
+  });
+
+  it("passes when the archive file exists, whatever the key", () => {
+    assert.equal(missingArchiveGuard(none, args("rooms", "--json"), present), null);
+  });
+
+  it("passes with a Keychain key or an explicit KATOK_ARCHIVE_KEY", () => {
+    assert.equal(missingArchiveGuard({ source: "env" }, args("rooms"), missing), null);
+    assert.equal(
+      missingArchiveGuard({ source: "keychain", key: SECRET }, args("rooms"), missing),
+      null,
+    );
+  });
+
+  it("checks the file in the data dir katok receives", () => {
+    const seen = [];
+    missingArchiveGuard(none, args("rooms"), (file) => {
+      seen.push(file);
+      return true;
+    });
+    assert.deepEqual(seen, ["/tmp/katok-guard-test/archive.sqlite3"]);
+  });
+
+  it("finds the subcommand after the global flags", () => {
+    assert.deepEqual(commandArgs(["--data-dir", "/x", "rooms", "--json"]), ["rooms", "--json"]);
+    assert.deepEqual(commandArgs(["rooms"]), ["rooms"]);
+    assert.equal(opensArchive(["--data-dir", "/x", "doctor", "--json"]), false);
+    assert.equal(opensArchive(["--data-dir", "/x", "rooms", "--json"]), true);
+    assert.equal(opensArchive([]), true);
   });
 });

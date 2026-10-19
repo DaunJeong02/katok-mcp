@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { KeychainNotFoundError } from "../dist/keychain.js";
+import { KeychainDuplicateError, KeychainNotFoundError } from "../dist/keychain.js";
 import { initialize } from "../dist/workflows.js";
 
 const SECRET = "ab".repeat(32);
@@ -16,6 +16,7 @@ function harness({
   readError = null,
   archive = false,
   syncError = null,
+  raceWinner = null,
 } = {}) {
   const log = [];
   const state = { stored, resets: 0 };
@@ -29,6 +30,11 @@ function harness({
     },
     writeKey: async (service, account, key) => {
       log.push(["write", service, account]);
+      if (raceWinner !== null) {
+        // Another katok_init stored its key between our read and our write.
+        state.stored = raceWinner;
+        throw new KeychainDuplicateError(service, account);
+      }
       state.stored = key;
       state.writtenKey = key;
     },
@@ -107,6 +113,44 @@ describe("katok_init", () => {
     assert.ok(!names(log).includes("write"));
     assert.equal(result.key.created, false);
     assert.equal(result.sync !== null, true);
+  });
+
+  it("resets the key cache on the existing-key branch too, before the first sync", async () => {
+    const { deps, log, state } = harness({ stored: SECRET });
+    await initialize(deps);
+    assert.equal(state.resets, 1);
+    assert.ok(names(log).indexOf("reset") < names(log).indexOf("katok"));
+  });
+
+  it("resets the key cache even when the archive already exists", async () => {
+    const { deps, state } = harness({ stored: SECRET, archive: true });
+    await initialize(deps);
+    assert.equal(state.resets, 1);
+  });
+
+  it("uses the key a concurrent init stored first instead of its own", async () => {
+    const winner = "cd".repeat(32);
+    const { deps, log, state } = harness({ raceWinner: winner });
+    const result = await initialize(deps);
+    assert.equal(result.key.created, false);
+    assert.equal(result.key.source, "keychain");
+    assert.equal(state.stored, winner);
+    // read (not found), generate, write (duplicate), read again, reset, then the sync.
+    assert.deepEqual(
+      names(log).filter((name) => name !== "exists"),
+      ["read", "generate", "write", "read", "reset", "mkdir", "katok", "katok"],
+    );
+    assert.ok(!JSON.stringify(result).includes(winner));
+    assert.ok(!JSON.stringify(result).includes(SECRET));
+  });
+
+  it("passes a failed write other than a duplicate through", async () => {
+    const { deps, log } = harness();
+    deps.writeKey = async () => {
+      throw new Error("security add-generic-password failed: User canceled the operation");
+    };
+    await assert.rejects(initialize(deps), /User canceled/);
+    assert.ok(!names(log).includes("katok"));
   });
 
   it("only returns doctor when the archive already exists", async () => {
