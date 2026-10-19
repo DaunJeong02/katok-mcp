@@ -6,20 +6,16 @@
  */
 
 import path from "node:path";
+import { dataDir, type Env, mediaDir, POLICY_FILES, transcriptDir } from "./paths.js";
 
-/** Repository of the katok fork. Policy files the send gate points at live here. */
-export const KATOK_REPO = "/Users/jeongdaun/enternext/01_business/36_katok";
-export const POLICY_FILES = [
-  `${KATOK_REPO}/ACCEPTABLE_USE_POLICY.md`,
-  `${KATOK_REPO}/DISCLAIMER.md`,
-] as const;
+export { POLICY_FILES };
 
-export type Env = Readonly<Record<string, string | undefined>>;
-
-/** Optional global flags placed before the subcommand. */
+/**
+ * Global flags placed before every subcommand. The data directory is always explicit, so katok
+ * never falls back to its own default archive.
+ */
 export function globalArgs(env: Env): string[] {
-  const dataDir = env.KATOK_MCP_DATA_DIR;
-  return dataDir ? ["--data-dir", dataDir] : [];
+  return ["--data-dir", dataDir(env)];
 }
 
 export function doctorArgs(input: { probe?: boolean }): string[] {
@@ -35,6 +31,60 @@ export function syncArgs(input: { incremental?: boolean }): string[] {
   if (input.incremental === true) args.push("--incremental");
   args.push("--json");
   return args;
+}
+
+export type MediaKind = "photo" | "video" | "file";
+export const ALL_MEDIA_KINDS: readonly MediaKind[] = ["file", "photo", "video"];
+
+export interface MediaBackfillInput {
+  chat_id?: string;
+  kind?: MediaKind[];
+  dry_run?: boolean;
+  max_bytes?: number;
+  limit?: number;
+  out_dir?: string;
+}
+
+/**
+ * `katok media backfill` argv plus the directory it writes into. katok's own default kind is
+ * `file` only; this server defaults to every kind because the goal is to keep all attachments.
+ * `--out` is always explicit so the result can name the directory.
+ */
+export function mediaBackfillPlan(
+  input: MediaBackfillInput,
+  env: Env,
+): { args: string[]; out_dir: string } {
+  const outDir = input.out_dir ? path.resolve(input.out_dir) : mediaDir(env);
+  const kinds = input.kind && input.kind.length > 0 ? input.kind : ALL_MEDIA_KINDS;
+  const args = ["media", "backfill"];
+  if (input.chat_id) args.push("--chat", input.chat_id);
+  for (const kind of kinds) args.push("--kind", kind);
+  if (input.dry_run === true) args.push("--dry-run");
+  if (input.max_bytes !== undefined) args.push("--max-bytes", String(input.max_bytes));
+  if (input.limit !== undefined) args.push("--limit", String(input.limit));
+  args.push("--out", outDir, "--json");
+  return { args, out_dir: outDir };
+}
+
+export interface SyncInput {
+  incremental?: boolean;
+  with_media?: boolean;
+}
+
+export interface PlanStep {
+  name: "sync" | "backfill";
+  args: string[];
+  out_dir?: string;
+}
+
+/** The ordered katok invocations behind one katok_sync call: sync first, then backfill. */
+export function syncPlan(input: SyncInput, env: Env): PlanStep[] {
+  const steps: PlanStep[] = [{ name: "sync", args: syncArgs({ incremental: input.incremental }) }];
+  if (input.with_media === true) {
+    const backfill = mediaBackfillPlan({}, env);
+    steps.push({ name: "backfill", args: backfill.args, out_dir: backfill.out_dir });
+  }
+  return steps;
 }
 
 export function roomsArgs(): string[] {
@@ -115,8 +165,6 @@ export function transcriptArgs(input: {
   return args;
 }
 
-export type MediaKind = "photo" | "video" | "file";
-
 export function mediaGetArgs(input: {
   chat_id: string;
   kind?: MediaKind[];
@@ -133,6 +181,16 @@ export function mediaGetArgs(input: {
   if (input.limit !== undefined) args.push("--limit", String(input.limit));
   args.push("--json");
   return args;
+}
+
+/** Where `katok media get` writes when no --out is given (cli/src/commands/media_commands.rs). */
+export function mediaGetOutDir(input: { chat_id: string; out_dir?: string }, env: Env): string {
+  return input.out_dir ? path.resolve(input.out_dir) : path.join(mediaDir(env), input.chat_id);
+}
+
+/** Where `katok transcript` writes when no --out is given. */
+export function transcriptOutDir(input: { out_dir?: string }, env: Env): string {
+  return input.out_dir ? path.resolve(input.out_dir) : transcriptDir(env);
 }
 
 export function listWindowsArgs(): string[] {

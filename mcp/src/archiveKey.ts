@@ -6,21 +6,17 @@
  * The key value never appears in logs, errors, or tool results. Only its source does.
  */
 
-import { execFile } from "node:child_process";
 import { closeSync, openSync, readSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { type KeychainReader, readKeychain } from "./keychain.js";
+import type { Env } from "./paths.js";
 
 export const ARCHIVE_KEY_ENV = "KATOK_ARCHIVE_KEY";
-export const DEFAULT_KEYCHAIN_SERVICE = "com.enternext.enter-cut";
-export const DEFAULT_KEYCHAIN_ACCOUNT = "katok-archive-key";
+export const DEFAULT_KEYCHAIN_SERVICE = "com.enternext.katok-mcp";
+export const DEFAULT_KEYCHAIN_ACCOUNT = "archive-key";
 export const KEY_HINT =
-  "KATOK_ARCHIVE_KEY 환경변수 또는 키체인 항목이 필요합니다 (KATOK_ARCHIVE_KEY env var or a Keychain item is required).";
-
-/** The first lookup can wait on a macOS "allow access" dialog, so give a person time to answer. */
-const KEYCHAIN_TIMEOUT_MS = 60_000;
-
-export type Env = Readonly<Record<string, string | undefined>>;
+  "KATOK_ARCHIVE_KEY 환경변수 또는 키체인 항목이 필요합니다. katok_init을 한 번 실행하면 키체인 항목을 만들고 첫 동기화까지 합니다 (run katok_init once to create the Keychain item, or set KATOK_ARCHIVE_KEY).";
 
 export type KeySource = "env" | "keychain" | "none";
 
@@ -31,8 +27,6 @@ export interface KeyResolution {
   /** Why no key is available. Safe to show: it never contains the key. */
   reason?: string;
 }
-
-export type KeychainReader = (service: string, account: string) => Promise<string>;
 
 export interface KeychainTarget {
   service: string;
@@ -48,25 +42,6 @@ export function keychainTarget(env: Env): KeychainTarget | null {
     account: env.KATOK_MCP_KEYCHAIN_ACCOUNT || DEFAULT_KEYCHAIN_ACCOUNT,
   };
 }
-
-/** Read one generic password with /usr/bin/security. Rejects without the value on failure. */
-export const readKeychain: KeychainReader = (service, account) =>
-  new Promise((resolve, reject) => {
-    execFile(
-      "/usr/bin/security",
-      ["find-generic-password", "-s", service, "-a", account, "-w"],
-      { timeout: KEYCHAIN_TIMEOUT_MS, encoding: "utf8" },
-      (error, stdout, stderr) => {
-        if (error) {
-          // stderr carries messages such as "could not be found"; stdout would hold the secret.
-          const why = String(stderr ?? "").trim() || error.message;
-          reject(new Error(`security find-generic-password failed: ${why}`));
-          return;
-        }
-        resolve(String(stdout));
-      },
-    );
-  });
 
 /**
  * Create a resolver that reads the Keychain at most once per process and caches the outcome,
@@ -91,7 +66,7 @@ export function createKeyProvider(reader: KeychainReader = readKeychain) {
     }
   }
 
-  return async function resolve(env: Env): Promise<KeyResolution> {
+  async function resolve(env: Env): Promise<KeyResolution> {
     if (env[ARCHIVE_KEY_ENV]) return { source: "env" };
     const target = keychainTarget(env);
     if (target === null) {
@@ -99,7 +74,14 @@ export function createKeyProvider(reader: KeychainReader = readKeychain) {
     }
     cached ??= lookup(target);
     return cached;
-  };
+  }
+
+  /** Forget the cached outcome. katok_init calls this after it stores a new key. */
+  function reset(): void {
+    cached = null;
+  }
+
+  return Object.assign(resolve, { reset });
 }
 
 /** Child-process env with the key filled in when it came from the Keychain. */
@@ -112,7 +94,7 @@ export function withArchiveKey(
 }
 
 export const WRONG_KEY_HINT =
-  "키체인에서 읽은 키로 이 아카이브를 열지 못했습니다 (the Keychain key does not open this archive). The default Keychain item belongs to the enter-cut archive at ~/Library/Application Support/enter-cut/katok: set KATOK_MCP_DATA_DIR to that directory, or supply the matching KATOK_ARCHIVE_KEY.";
+  "키체인에서 읽은 키로 이 아카이브를 열지 못했습니다 (the Keychain key does not open this archive). 데이터 폴더(KATOK_MCP_DATA_DIR 또는 기본 ~/Library/Application Support/katok-mcp)의 아카이브가 다른 키로 암호화돼 있습니다. 맞는 키를 KATOK_ARCHIVE_KEY로 주거나, 키체인 항목을 원래 키로 복구하거나, 데이터 폴더를 옮긴 뒤 katok_init을 다시 실행하세요.";
 
 /** True when SQLCipher rejected the supplied key ("file is not a database"). */
 export function isWrongKeyFailure(text: string): boolean {
@@ -124,8 +106,8 @@ export function isArchiveKeyFailure(text: string): boolean {
   return text.includes(ARCHIVE_KEY_ENV) || /archive .* is encrypted/.test(text);
 }
 
-/** katok's own default when no --data-dir is given (36_katok src/paths.rs default_data_dir). */
-export function defaultDataDir(): string {
+/** katok's own default when no --data-dir is given (cli/src/paths.rs default_data_dir). */
+export function katokDefaultDataDir(): string {
   return path.join(os.homedir(), "Library", "Application Support", "katok");
 }
 
@@ -138,7 +120,7 @@ export function dataDirFromArgs(args: readonly string[]): string {
   const firstNonGlobal = args.findIndex((arg) => !arg.startsWith("--"));
   const value = index >= 0 ? args[index + 1] : undefined;
   const isGlobal = index >= 0 && (firstNonGlobal === -1 || index < firstNonGlobal);
-  return isGlobal && value ? path.resolve(value) : defaultDataDir();
+  return isGlobal && value ? path.resolve(value) : katokDefaultDataDir();
 }
 
 export const SQLITE_PLAINTEXT_HEADER = Buffer.from("SQLite format 3\0", "latin1");
@@ -168,7 +150,7 @@ export const PLAINTEXT_REFUSAL =
 
 /**
  * Refuse to hand a Keychain key to katok for a plaintext archive: katok would encrypt it in
- * place (36_katok src/archive.rs encrypt_in_place). An explicit KATOK_ARCHIVE_KEY env var is
+ * place (cli/src/archive.rs encrypt_in_place). An explicit KATOK_ARCHIVE_KEY env var is
  * the operator's own choice and is not checked. A missing archive is fine: the first sync
  * creates it with that key on purpose.
  *

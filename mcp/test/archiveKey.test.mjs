@@ -8,9 +8,9 @@ import {
   DEFAULT_KEYCHAIN_ACCOUNT,
   DEFAULT_KEYCHAIN_SERVICE,
   dataDirFromArgs,
-  defaultDataDir,
   isArchiveKeyFailure,
   isWrongKeyFailure,
+  katokDefaultDataDir,
   keychainTarget,
   plaintextGuard,
   withArchiveKey,
@@ -29,6 +29,11 @@ function fakeReader(result) {
 }
 
 describe("keychainTarget", () => {
+  it("defaults to the dedicated katok-mcp item", () => {
+    assert.equal(DEFAULT_KEYCHAIN_SERVICE, "com.enternext.katok-mcp");
+    assert.equal(DEFAULT_KEYCHAIN_ACCOUNT, "archive-key");
+  });
+
   it("uses the default service and account", () => {
     assert.deepEqual(keychainTarget({}), {
       service: DEFAULT_KEYCHAIN_SERVICE,
@@ -94,6 +99,15 @@ describe("createKeyProvider", () => {
     assert.equal(result.key, undefined);
     assert.match(result.reason, /could not be found/);
     assert.equal(calls.length, 1);
+  });
+
+  it("reset() makes the next call read the Keychain again", async () => {
+    const { reader, calls } = fakeReader(new Error("item could not be found"));
+    const resolve = createKeyProvider(reader);
+    assert.equal((await resolve({})).source, "none");
+    resolve.reset();
+    await resolve({});
+    assert.equal(calls.length, 2);
   });
 
   it("treats an empty item as 'none'", async () => {
@@ -168,7 +182,8 @@ describe("plaintextGuard", () => {
 
   it("checks the same directory katok receives", () => {
     assert.equal(dataDirFromArgs(args), "/tmp/katok-guard-test");
-    assert.equal(dataDirFromArgs(["rooms", "--json"]), defaultDataDir());
-    assert.ok(defaultDataDir().endsWith("/Library/Application Support/katok"));
+    // Without a --data-dir katok would use its own default, so that is what the guard checks.
+    assert.equal(dataDirFromArgs(["rooms", "--json"]), katokDefaultDataDir());
+    assert.ok(katokDefaultDataDir().endsWith("/Library/Application Support/katok"));
   });
 });

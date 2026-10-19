@@ -9,8 +9,6 @@
 
 import { execFile } from "node:child_process";
 import { accessSync, constants } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
   createKeyProvider,
   isArchiveKeyFailure,
@@ -21,10 +19,12 @@ import {
   WRONG_KEY_HINT,
   withArchiveKey,
 } from "./archiveKey.js";
-import { KATOK_REPO } from "./args.js";
+import { binCandidates } from "./paths.js";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const LONG_TIMEOUT_MS = 600_000;
+/** Downloading every attachment of every room can run far longer than a sync. */
+export const BACKFILL_TIMEOUT_MS = 1_800_000;
 const MAX_BUFFER = 256 * 1024 * 1024;
 const STDOUT_HEAD = 4000;
 
@@ -46,6 +46,15 @@ export class KatokError extends Error {
   }
 }
 
+/** The same error with one more sentence appended to its message; the detail is kept. */
+export function withNote(error: unknown, note: string): unknown {
+  if (error instanceof KatokError) {
+    return new KatokError(`${error.message}. ${note}`, error.detail);
+  }
+  if (error instanceof Error) return new Error(`${error.message}. ${note}`);
+  return new Error(`${String(error)}. ${note}`);
+}
+
 function isExecutable(file: string): boolean {
   try {
     accessSync(file, constants.X_OK);
@@ -55,20 +64,12 @@ function isExecutable(file: string): boolean {
   }
 }
 
-export function binCandidates(env: NodeJS.ProcessEnv): string[] {
-  const list: string[] = [];
-  if (env.KATOK_BIN) list.push(env.KATOK_BIN);
-  list.push(path.join(KATOK_REPO, "target/release/katok"));
-  list.push(path.join(os.homedir(), ".cargo/bin/katok"));
-  return list;
-}
-
 export function resolveBin(env: NodeJS.ProcessEnv = process.env): string {
   const candidates = binCandidates(env);
   const found = candidates.find(isExecutable);
   if (!found) {
     throw new Error(
-      `katok binary not found. Tried: ${candidates.join(", ")}. Set KATOK_BIN to the katok executable.`,
+      `katok binary not found. Tried: ${candidates.join(", ")}. Build it with scripts/install.sh (cargo build --release in cli/), or set KATOK_BIN to the katok executable.`,
     );
   }
   return found;
@@ -104,6 +105,11 @@ export interface RunOptions {
 
 /** One Keychain lookup per server process. */
 const archiveKey = createKeyProvider();
+
+/** Forget the cached Keychain lookup, e.g. after katok_init stored a new key. */
+export function resetArchiveKey(): void {
+  archiveKey.reset();
+}
 
 /**
  * Run katok with KATOK_ARCHIVE_KEY supplied from the env or the Keychain. When no key is

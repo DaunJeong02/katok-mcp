@@ -18,6 +18,7 @@ import {
   syncArgs,
   transcriptArgs,
 } from "../dist/args.js";
+import { defaultDataDir } from "../dist/paths.js";
 
 const DELIVERY_FLAGS = ["--text", "--image", "--accept-use-policy", "--draft"];
 const OPEN_ENV = {
@@ -117,9 +118,11 @@ describe("read commands", () => {
     assert.deepEqual(listWindowsArgs(), ["send", "--list-windows", "--json"]);
   });
 
-  it("global --data-dir comes only from KATOK_MCP_DATA_DIR", () => {
-    assert.deepEqual(globalArgs({}), []);
+  it("global --data-dir is always explicit: KATOK_MCP_DATA_DIR or the dedicated default", () => {
+    assert.deepEqual(globalArgs({}), ["--data-dir", defaultDataDir()]);
+    assert.deepEqual(globalArgs({ KATOK_MCP_DATA_DIR: "" }), ["--data-dir", defaultDataDir()]);
     assert.deepEqual(globalArgs({ KATOK_MCP_DATA_DIR: "/d" }), ["--data-dir", "/d"]);
+    assert.ok(defaultDataDir().endsWith("/Library/Application Support/katok-mcp"));
   });
 });
 
