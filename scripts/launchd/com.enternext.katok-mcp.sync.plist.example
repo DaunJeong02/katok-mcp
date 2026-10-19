@@ -19,6 +19,10 @@
 
   Full Disk Access is NOT inherited from your terminal: grant it to /bin/bash and to
   __REPO__/cli/target/release/katok. Run katok_init once first, so the Keychain key exists.
+  The binary is ad-hoc signed, so every rebuild changes its code hash (cdhash) and can void that
+  macOS approval. After a rebuild, approve cli/target/release/katok again in System Settings >
+  Privacy & Security > Full Disk Access. Do not build the release binary (cargo build, release profile) while
+  this job is running; check with: launchctl print gui/$(id -u)/com.enternext.katok-mcp.sync | grep state
 
   Where the output goes:
     - stdout of each step (katok's JSON result, counts and status, no message text) is saved,

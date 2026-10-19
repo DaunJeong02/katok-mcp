@@ -35,6 +35,12 @@
 
 ### Reading
 
+- An unreadable KakaoTalk container (permission denied, interrupted call, ...) is
+  reported as "container directory could not be read: <OS error>" instead of
+  "no KakaoTalk database files found". Only a missing directory still counts as
+  having no database files.
+- `media backfill` resolves the KakaoTalk databases once per run and reuses them for
+  the room list and every room, instead of listing the container again per room.
 - The self chat (the memo room whose only member is the account owner) is
   now typed `self` and named after the owner's nickname, which is how
   KakaoTalk titles its window. It used to come out as a `chat-<id>` group,
