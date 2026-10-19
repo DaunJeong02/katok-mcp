@@ -1,0 +1,277 @@
+use crate::{Error, Result};
+use rusqlite::{params, Connection, OpenFlags};
+use std::{collections::HashMap, path::Path};
+
+pub(crate) struct LocalVectorStore {
+    conn: Connection,
+    dimension: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredVector {
+    pub chunk_id: String,
+    pub content_hash: String,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VectorUpsert {
+    pub chunk_id: String,
+    pub content_hash: String,
+    pub seen_token: String,
+    pub heading_path: String,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VectorHit {
+    pub chunk_id: String,
+    pub score: f32,
+}
+
+impl LocalVectorStore {
+    pub(crate) fn open(dir: &Path, dimension: usize) -> Result<Self> {
+        crate::paths::ensure_private_dir(dir)?;
+        let path = dir.join("vectors.sqlite3");
+        let conn = Connection::open(&path).map_err(Error::Sql)?;
+        apply_key(&conn)?;
+        ensure_private_file(&path)?;
+        migrate(&conn)?;
+        Ok(Self { conn, dimension })
+    }
+
+    pub(crate) fn open_existing(dir: &Path, dimension: usize) -> Result<Self> {
+        let path = dir.join("vectors.sqlite3");
+        if !path.is_file() {
+            return Err(Error::SemanticIndexStale(format!(
+                "vector store is missing at {}",
+                path.display()
+            )));
+        }
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(Error::Sql)?;
+        apply_key(&conn)?;
+        // A plaintext generation left over from before the key was set reads as "not a
+        // database"; the caller treats that as stale and rebuilds the index.
+        conn.execute_batch("SELECT count(*) FROM sqlite_master;")
+            .map_err(Error::Sql)?;
+        Ok(Self { conn, dimension })
+    }
+
+    pub(crate) fn stored_vectors(&self) -> Result<HashMap<String, StoredVector>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT chunk_id, content_hash, vector FROM vectors")
+            .map_err(Error::Sql)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(Error::Sql)?;
+        rows.map(|row| {
+            let (chunk_id, content_hash, vector) = row.map_err(Error::Sql)?;
+            Ok((
+                chunk_id.clone(),
+                StoredVector {
+                    chunk_id,
+                    content_hash,
+                    vector: decode_vector(&vector, self.dimension)?,
+                },
+            ))
+        })
+        .collect()
+    }
+
+    pub(crate) fn content_pairs(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT chunk_id, content_hash, vector FROM vectors ORDER BY chunk_id")
+            .map_err(Error::Sql)?;
+        let pairs = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        pairs
+            .into_iter()
+            .map(|(chunk_id, content_hash, vector)| {
+                let expected = self.dimension * std::mem::size_of::<f32>();
+                if vector.len() != expected {
+                    return Err(Error::SemanticIndexStale(format!(
+                        "vector {chunk_id} has {} bytes, expected {expected}",
+                        vector.len()
+                    )));
+                }
+                Ok((chunk_id, content_hash))
+            })
+            .collect()
+    }
+
+    pub(crate) fn upsert(&self, item: &VectorUpsert) -> Result<()> {
+        if item.vector.len() != self.dimension {
+            return Err(Error::Embedding(format!(
+                "expected {} dimensions, got {}",
+                self.dimension,
+                item.vector.len()
+            )));
+        }
+        let vector = encode_vector(&item.vector);
+        self.conn
+            .execute(
+                "INSERT INTO vectors (
+                    chunk_id, content_hash, seen_token, heading_path, vector
+                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    seen_token = excluded.seen_token,
+                    heading_path = excluded.heading_path,
+                    vector = excluded.vector",
+                params![
+                    item.chunk_id,
+                    item.content_hash,
+                    item.seen_token,
+                    item.heading_path,
+                    vector
+                ],
+            )
+            .map_err(Error::Sql)?;
+        Ok(())
+    }
+
+    pub(crate) fn search(&self, query: &[f32], limit: usize) -> Result<Vec<VectorHit>> {
+        if query.len() != self.dimension {
+            return Err(Error::Embedding(format!(
+                "expected {} query dimensions, got {}",
+                self.dimension,
+                query.len()
+            )));
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT chunk_id, vector FROM vectors")
+            .map_err(Error::Sql)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(Error::Sql)?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (chunk_id, vector) = row.map_err(Error::Sql)?;
+            let vector = decode_vector(&vector, self.dimension)?;
+            let score = dot(query, &vector);
+            if score > 0.0 {
+                hits.push(VectorHit { chunk_id, score });
+            }
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+}
+
+fn ensure_private_file(path: &Path) -> Result<()> {
+    crate::paths::ensure_private_file(path)
+}
+
+/// Same key as the archive, so vectors (which embed chat text) are never plaintext when the
+/// archive is not.
+fn apply_key(conn: &Connection) -> Result<()> {
+    if let Some(key) = crate::paths::archive_key()? {
+        conn.execute_batch(&crate::paths::key_pragma(&key))
+            .map_err(Error::Sql)?;
+    }
+    Ok(())
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS vectors (
+            chunk_id TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            seen_token TEXT NOT NULL,
+            heading_path TEXT NOT NULL,
+            vector BLOB NOT NULL
+        );",
+    )
+    .map_err(Error::Sql)
+}
+
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn decode_vector(bytes: &[u8], dimension: usize) -> Result<Vec<f32>> {
+    if bytes.len() != dimension * std::mem::size_of::<f32>() {
+        return Err(Error::Embedding(
+            "stored vector has wrong byte length".to_string(),
+        ));
+    }
+    bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| {
+            let array =
+                <[u8; 4]>::try_from(chunk).map_err(|error| Error::Embedding(error.to_string()))?;
+            Ok(f32::from_le_bytes(array))
+        })
+        .collect()
+}
+
+fn dot(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vector(chunk_id: &str, content_hash: &str, values: [f32; 2]) -> VectorUpsert {
+        VectorUpsert {
+            chunk_id: chunk_id.to_string(),
+            content_hash: content_hash.to_string(),
+            seen_token: "seen".to_string(),
+            heading_path: "Synthetic room / parent window".to_string(),
+            vector: values.to_vec(),
+        }
+    }
+
+    #[test]
+    fn loads_vector_metadata_in_one_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalVectorStore::open(dir.path(), 2).expect("open store");
+        store
+            .upsert(&vector("parent-b", "hash-b", [0.0, 1.0]))
+            .expect("upsert parent b");
+        store
+            .upsert(&vector("parent-a", "hash-a", [1.0, 0.0]))
+            .expect("upsert parent a");
+
+        let stored = store.stored_vectors().expect("load stored vectors");
+
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored["parent-a"].content_hash, "hash-a");
+        assert_eq!(stored["parent-b"].content_hash, "hash-b");
+    }
+}

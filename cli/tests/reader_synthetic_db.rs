@@ -1,0 +1,595 @@
+//! Hermetic reader test: build a synthetic SQLCipher database with the
+//! KakaoTalk schema at test time (cipher_compatibility 3 + passphrase), insert
+//! direct + group + reply rows, then drive the native reader against it and
+//! assert the mapped `RawMessage`/`ChatSummary` output. No real KakaoTalk and
+//! no system state (ioreg/plist) are touched: auth is resolved purely from the
+//! injected overrides.
+
+use std::path::Path;
+
+use katok::kakao::{auth, derive, AuthOptions};
+use rusqlite::Connection;
+
+const TEST_UUID: &str = "00000000-1111-2222-3333-444444444444";
+const TEST_USER_ID: i64 = 1_000_000_001;
+
+/// Open a writable SQLCipher DB with the reader's exact open recipe and create
+/// the KakaoTalk schema. Returns the opened connection for further inserts.
+fn open_with_schema(path: &Path, key: &str) -> Connection {
+    let conn = Connection::open(path).expect("open writable db");
+    // Mirror the reader's open recipe exactly (key first, then compat 3) so the
+    // on-disk cipher parameters match what the reader will use.
+    conn.execute_batch(&format!(
+        "PRAGMA key = '{key}'; PRAGMA cipher_compatibility = 3;"
+    ))
+    .expect("apply cipher key");
+
+    conn.execute_batch(
+        "CREATE TABLE NTChatRoom (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            linkId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT 0,
+            chatName TEXT,
+            activeMembersCount INTEGER NOT NULL DEFAULT 0,
+            directChatMemberUserId INTEGER NOT NULL DEFAULT 0,
+            displayMemberIds BLOB,
+            PRIMARY KEY (chatId, linkId)
+        );
+        CREATE TABLE NTUser (
+            userId INTEGER NOT NULL DEFAULT 0,
+            linkId INTEGER NOT NULL DEFAULT 0,
+            friendNickName TEXT,
+            nickName TEXT,
+            displayName TEXT,
+            PRIMARY KEY (userId, linkId)
+        );
+        CREATE TABLE NTChatMessage (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            logId INTEGER NOT NULL DEFAULT 0,
+            msgId INTEGER NOT NULL DEFAULT 0,
+            authorId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT -1,
+            supplement TEXT,
+            attachment TEXT,
+            message TEXT,
+            sentAt INTEGER DEFAULT 0,
+            PRIMARY KEY (chatId, logId, msgId)
+        );
+        CREATE TABLE NTChatMeta (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT 0,
+            revision INTEGER NOT NULL DEFAULT 0,
+            content TEXT,
+            PRIMARY KEY (chatId, type, revision)
+        );",
+    )
+    .expect("create schema");
+    conn
+}
+
+fn create_encrypted_db(path: &Path, key: &str) {
+    let conn = open_with_schema(path, key);
+
+    // Rooms: 100 is a direct chat (type 0), 200 is a group (type 1).
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId)
+         VALUES (100, 0, 0, 'Alice DM', 2, 500), (200, 0, 1, 'Project Group', 4, 0)",
+        [],
+    )
+    .expect("insert rooms");
+
+    // Users: a peer (500) and an explicitly synthetic self id.
+    conn.execute(
+        "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
+         VALUES (500, 0, 'Alice', NULL, 'Alice Display'),
+                (?1, 0, NULL, NULL, 'Me Display'),
+                (600, 0, NULL, 'BobNick', NULL)",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert users");
+
+    // Messages: direct text, group text, a non-text type, and a reply.
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, attachment, message, sentAt)
+         VALUES
+            (100, 10, 1, 500, 1, NULL, NULL, 'direct hello', 1700000000),
+            (100, 11, 2, ?1, 1, NULL, NULL, 'direct reply body', 1700000100),
+            (200, 20, 3, 600, 1, NULL, NULL, 'group message', 1700000200),
+            (200, 21, 4, 500, 26, NULL, NULL, 'image caption', 1700000300),
+            (200, 22, 5, 600, 1, '{\"reply\":{\"src_logId\":20}}', NULL, 'this is a reply', 1700000400),
+            (200, 23, 6, 500, 1, NULL, NULL, '', 1700000500),
+            -- Reply fixture: type 26, src_logId at the top level of
+            -- `attachment`, and `supplement` empty. The row above retains the
+            -- alternate supplement shape so both parser contracts stay explicit.
+            (200, 24, 7, 600, 26, NULL, '{\"src_logId\":20,\"src_type\":1,\"src_userId\":600}', 'attachment-form reply', 1700000600)",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert messages");
+}
+
+#[test]
+fn reads_synthetic_kakao_db_and_maps_model() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    // Place the synthetic DB where container_dir(home) will discover it, named
+    // exactly as the real derivation would name it.
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+    create_encrypted_db(&db_path, &key);
+
+    // Resolve auth from injected overrides only (no ioreg/plist).
+    let options = AuthOptions {
+        home,
+        data_dir: data_dir.clone(),
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    // Empty-text message (logId 23) is filtered out → 6 messages remain.
+    assert_eq!(output.messages.len(), 6);
+
+    // Two chats discovered with correct classification.
+    assert_eq!(output.chats.len(), 2);
+    let direct = output
+        .chats
+        .iter()
+        .find(|chat| chat.chat_id == "100")
+        .expect("direct chat");
+    assert_eq!(direct.chat_type, "direct");
+    assert_eq!(direct.chat_name, "Alice DM");
+    let group = output
+        .chats
+        .iter()
+        .find(|chat| chat.chat_id == "200")
+        .expect("group chat");
+    assert_eq!(group.chat_type, "group");
+    assert_eq!(group.chat_name, "Project Group");
+
+    let by_id = |id: &str| {
+        output
+            .messages
+            .iter()
+            .find(|message| message.message_id == id)
+            .unwrap_or_else(|| panic!("missing message {id}"))
+    };
+
+    // Direct message: sender join, timestamp, text message_type.
+    let direct_hello = by_id("100-10");
+    assert_eq!(direct_hello.chat_type, "direct");
+    assert_eq!(direct_hello.sender_id, "500");
+    assert_eq!(direct_hello.sender_nickname, "Alice"); // friendNickName wins
+    assert_eq!(direct_hello.message_type, "text");
+    assert_eq!(
+        direct_hello.timestamp.to_rfc3339(),
+        "2023-11-14T22:13:20+00:00"
+    );
+
+    // Self message uses displayName.
+    let self_message = by_id("100-11");
+    assert_eq!(self_message.sender_id, TEST_USER_ID.to_string());
+    assert_eq!(self_message.sender_nickname, "Me Display");
+
+    // Group user falls back to nickName.
+    let group_message = by_id("200-20");
+    assert_eq!(group_message.chat_type, "group");
+    assert_eq!(group_message.sender_nickname, "BobNick");
+
+    // Non-text type becomes type_<n>.
+    let image = by_id("200-21");
+    assert_eq!(image.message_type, "type_26");
+
+    // Reply links to the parent logId within the same chat.
+    let reply = by_id("200-22");
+    assert_eq!(reply.reply_to_message_id.as_deref(), Some("200-20"));
+
+    // The attachment form keeps `src_logId` outside `supplement`; both forms
+    // remain synthetic and exercise distinct parser branches.
+    let attachment_reply = by_id("200-24");
+    assert_eq!(
+        attachment_reply.reply_to_message_id.as_deref(),
+        Some("200-20")
+    );
+
+    // Account hash is the stable sha256(user_id) for every row.
+    let account = &output.messages[0].account_hash;
+    assert_eq!(account.len(), 64);
+    assert!(output
+        .messages
+        .iter()
+        .all(|message| &message.account_hash == account));
+
+    // Messages are sorted chronologically per chat.
+    let chat_200: Vec<&str> = output
+        .messages
+        .iter()
+        .filter(|message| message.chat_id == "200")
+        .map(|message| message.message_id.as_str())
+        .collect();
+    assert_eq!(chat_200, vec!["200-20", "200-21", "200-22", "200-24"]);
+}
+
+/// A single malformed message row (a non-UTF8 BLOB stored in the TEXT `message`
+/// column, which fails `String` deserialization) must be skipped, leaving the
+/// surrounding well-formed rows intact — not abort the whole read.
+#[test]
+fn malformed_message_row_is_skipped_not_fatal() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = open_with_schema(&db_path, &key);
+    conn.execute(
+        "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
+         VALUES (500, 0, 'Alice', NULL, NULL)",
+        [],
+    )
+    .expect("insert user");
+    // Two good rows.
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (100, 10, 1, 500, 1, NULL, 'good one', 1700000000),
+                (100, 12, 3, 500, 1, NULL, 'good two', 1700000200)",
+        [],
+    )
+    .expect("insert good rows");
+    // One malformed row: a non-UTF8 BLOB in the TEXT `message` column. It passes
+    // the `message IS NOT NULL AND message <> ''` filter but fails String decode.
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (100, 11, 2, 500, 1, NULL, x'ff', 1700000100)",
+        [],
+    )
+    .expect("insert malformed row");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    // The malformed row is dropped; both good rows survive.
+    let ids: Vec<&str> = output
+        .messages
+        .iter()
+        .map(|message| message.message_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["100-10", "100-12"]);
+}
+
+/// A database file named `<78-hex>.db` (the optional reference suffix) must be
+/// discovered and read, matching `HEX_DATABASE_PATTERN`.
+#[test]
+fn discovers_and_reads_db_suffixed_file() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    // Name the DB `<derived>.db` instead of the bare derived name.
+    let db_name = format!("{}.db", derive::database_name(TEST_USER_ID, TEST_UUID));
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+    create_encrypted_db(&db_path, &key);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    // Same content as the bare-named DB: 6 mapped messages, 2 chats.
+    assert_eq!(output.messages.len(), 6);
+    assert_eq!(output.chats.len(), 2);
+}
+
+/// When `chatName` is empty (the common case for auto-titled rooms), the reader
+/// reconstructs a human name from the same DB the way the KakaoTalk UI does: a
+/// direct chat takes its peer's nickname, a group chat joins its display-member
+/// nicknames, and a room whose members resolve to nothing keeps `chat-<id>`.
+#[test]
+fn reconstructs_names_for_unnamed_rooms() {
+    // `displayMemberIds` binary plists from CPython `plistlib.dumps(_, FMT_BINARY)`.
+    // [500, 600]
+    const DISPLAY_MEMBERS_500_600: &[u8] = &[
+        0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, 0xa2, 0x01, 0x02, 0x11, 0x01, 0xf4, 0x11,
+        0x02, 0x58, 0x08, 0x0b, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11,
+    ];
+    // [999] (no matching NTUser row)
+    const DISPLAY_MEMBERS_999: &[u8] = &[
+        0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, 0xa1, 0x01, 0x11, 0x03, 0xe7, 0x08, 0x0a,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x0d,
+    ];
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = open_with_schema(&db_path, &key);
+    conn.execute(
+        "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
+         VALUES (500, 0, 'Alice', NULL, 'Alice Display'),
+                (600, 0, NULL, 'BobNick', NULL),
+                (?1, 0, NULL, NULL, 'Me Display')",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert users");
+
+    // Room 100: direct, empty name, peer 500  → "Alice".
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (100, 0, 0, '', 2, 500, NULL)",
+        [],
+    )
+    .expect("room 100");
+    // Room 200: group, empty name, displayMembers [500, 600] → "Alice, BobNick".
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (200, 0, 1, '', 3, 0, ?1)",
+        rusqlite::params![DISPLAY_MEMBERS_500_600],
+    )
+    .expect("room 200");
+    // Room 300: group, empty name, displayMembers [999] (unresolvable) → "chat-300".
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (300, 0, 1, '', 5, 0, ?1)",
+        rusqlite::params![DISPLAY_MEMBERS_999],
+    )
+    .expect("room 300");
+    // Room 400: group, empty name, has a user-set title AND resolvable members;
+    // the title must win over the member join.
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (400, 0, 1, '', 3, 0, ?1)",
+        rusqlite::params![DISPLAY_MEMBERS_500_600],
+    )
+    .expect("room 400");
+    // Two title revisions for room 400: the highest revision (the rename) wins.
+    conn.execute(
+        "INSERT INTO NTChatMeta(chatId, type, revision, content)
+         VALUES (400, 3, 1, 'Old Title'),
+                (400, 3, 5, 'Renamed Room'),
+                (200, 1, 9, 'a notice, not a title')",
+        [],
+    )
+    .expect("insert meta");
+
+    // One message per room so each chat surfaces in the reader output.
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (100, 10, 1, 500, 1, NULL, 'hi direct', 1700000000),
+                (200, 20, 2, 600, 1, NULL, 'hi group', 1700000100),
+                (300, 30, 3, 500, 1, NULL, 'hi other', 1700000200),
+                (400, 40, 4, 500, 1, NULL, 'hi titled', 1700000300)",
+        [],
+    )
+    .expect("insert messages");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    let name_of = |id: &str| {
+        output
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == id)
+            .unwrap_or_else(|| panic!("missing chat {id}"))
+            .chat_name
+            .clone()
+    };
+    assert_eq!(name_of("100"), "Alice"); // direct peer's nickname
+    assert_eq!(name_of("200"), "Alice, BobNick"); // joined display members
+    assert_eq!(name_of("300"), "chat-300"); // members resolve to nothing
+    assert_eq!(name_of("400"), "Renamed Room"); // latest title beats member join
+
+    // The reconstructed name also rides on each mapped message, not just the
+    // chat summary.
+    let group_msg = output
+        .messages
+        .iter()
+        .find(|message| message.chat_id == "200")
+        .expect("group message");
+    assert_eq!(group_msg.chat_name, "Alice, BobNick");
+}
+
+/// The memo room whose only member is the account owner ("나와의 채팅") has no
+/// `chatName`, no peer and no display members, so it used to come out as a
+/// `chat-<id>` group. KakaoTalk titles its window with the owner's nickname, and
+/// `send --chat` finds windows by the archived name, so it must be stored under
+/// that nickname and typed `self`. A group everyone else has left has the same
+/// member shape and must stay an unnamed group.
+#[test]
+fn names_the_self_chat_after_the_owner() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = open_with_schema(&db_path, &key);
+    conn.execute(
+        "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
+         VALUES (?1, 0, NULL, NULL, 'Me Display')",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert users");
+    // Room 700: the self chat (type 5, one active member, no peer).
+    // Room 800: an ordinary group that everyone else has left.
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (700, 0, 5, NULL, 1, 0, NULL),
+                (800, 0, 1, NULL, 1, 0, NULL)",
+        [],
+    )
+    .expect("insert rooms");
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (700, 70, 1, ?1, 1, NULL, 'note to self', 1700000000),
+                (800, 80, 2, ?1, 1, NULL, 'anyone here', 1700000100)",
+        rusqlite::params![TEST_USER_ID],
+    )
+    .expect("insert messages");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    let chat = |id: &str| {
+        output
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == id)
+            .unwrap_or_else(|| panic!("missing chat {id}"))
+            .clone()
+    };
+    assert_eq!(chat("700").chat_type, "self");
+    assert_eq!(chat("700").chat_name, "Me Display");
+    assert_eq!(chat("800").chat_type, "group");
+    assert_eq!(chat("800").chat_name, "chat-800");
+
+    let self_msg = output
+        .messages
+        .iter()
+        .find(|message| message.chat_id == "700")
+        .expect("self-chat message");
+    assert_eq!(self_msg.chat_type, "self");
+    assert_eq!(self_msg.chat_name, "Me Display");
+}
+
+/// An older KakaoTalk schema without an `NTChatMeta` table and without the
+/// `NTChatRoom.displayMemberIds` column must still read: the best-effort title
+/// and member enrichment skip cleanly, and an unnamed room keeps `chat-<id>`.
+#[test]
+fn reads_older_schema_without_title_or_member_columns() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute_batch(&format!(
+        "PRAGMA key = '{key}'; PRAGMA cipher_compatibility = 3;"
+    ))
+    .expect("cipher key");
+    // No displayMemberIds column, and no NTChatMeta table at all.
+    conn.execute_batch(
+        "CREATE TABLE NTChatRoom (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            linkId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT 0,
+            chatName TEXT,
+            activeMembersCount INTEGER NOT NULL DEFAULT 0,
+            directChatMemberUserId INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chatId, linkId)
+        );
+        CREATE TABLE NTUser (
+            userId INTEGER NOT NULL DEFAULT 0,
+            linkId INTEGER NOT NULL DEFAULT 0,
+            friendNickName TEXT,
+            nickName TEXT,
+            displayName TEXT,
+            PRIMARY KEY (userId, linkId)
+        );
+        CREATE TABLE NTChatMessage (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            logId INTEGER NOT NULL DEFAULT 0,
+            msgId INTEGER NOT NULL DEFAULT 0,
+            authorId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT -1,
+            supplement TEXT,
+            attachment TEXT,
+            message TEXT,
+            sentAt INTEGER DEFAULT 0,
+            PRIMARY KEY (chatId, logId, msgId)
+        );",
+    )
+    .expect("create old schema");
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId)
+         VALUES (700, 0, 1, '', 3, 0)",
+        [],
+    )
+    .expect("room");
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (700, 70, 1, 800, 1, NULL, 'old schema hi', 1700000000)",
+        [],
+    )
+    .expect("message");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    assert_eq!(output.messages.len(), 1);
+    let chat = output
+        .chats
+        .iter()
+        .find(|chat| chat.chat_id == "700")
+        .expect("chat 700");
+    assert_eq!(chat.chat_name, "chat-700");
+}
