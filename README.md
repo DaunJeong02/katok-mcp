@@ -125,7 +125,7 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sy
 - **재빌드하면 권한을 다시 승인하십시오.** 바이너리는 ad-hoc 서명이라 재빌드마다 cdhash(코드 해시)가 바뀌고, macOS의 전체 디스크 접근(또는 앱 데이터 접근) 승인이 무효화될 수 있습니다. 재빌드 후 시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근 권한에서 `cli/target/release/katok`을 다시 승인하십시오.
 - **작업이 실행 중일 때는 `cargo build --release`를 하지 마십시오.** 실행 중 바이너리를 교체하면 권한 검증이 실패합니다. `launchctl print gui/$(id -u)/com.enternext.katok-mcp.sync | grep state`로 상태를 확인하십시오.
 - 작업은 `sync --incremental`, `media backfill`(file·photo·video), `index` 순으로 실행합니다. **결과를 버리지 않습니다.**
-  - 첫 `katok index`는 모든 window를 임베딩해 수십 분(약 90분/14k 문서) 걸릴 수 있습니다. 이후는 바뀐 window만 임베딩하는 증분이라 짧습니다. `katok index`가 `semantic_index_busy`로 실패하면 다른 index가 이미 돌고 있다는 뜻이며, 실패는 기록되고 다음 실행이 다시 시도합니다.
+  - 첫 `katok index`는 모든 window를 임베딩해 수십 분에서 한 시간 넘게 걸릴 수 있습니다. 이후는 바뀐 window만 임베딩하는 증분이라 짧습니다. `katok index`가 `semantic_index_busy`로 실패하면 다른 index가 이미 돌고 있다는 뜻이며, 실패는 기록되고 다음 실행이 다시 시도합니다.
   - 각 단계의 stdout(katok JSON 결과: 개수·상태. 실패 시 에러 봉투도 stdout으로 나옴)는 `<데이터 폴더>/last-sync.json`(sync), `last-backfill.json`(backfill), `last-index.json`(index)에 매번 덮어써 저장합니다. 데이터 폴더는 0700, 파일은 0600입니다. 실행 시작 때 세 파일을 지우므로 파일이 없으면 그 단계가 실행되지 않았거나 끝나지 않은 것입니다.
   - stderr는 `~/Library/Logs/katok-mcp-sync.log`에 남고, 작업이 중단되면 종료 코드와 시각이 한 줄 더 남습니다. 이 로그는 회전하지 않으니 가끔 비우십시오.
 

@@ -7,7 +7,7 @@
   template; nothing installs it.
 
   The index step runs `katok index`. The first index embeds every window and can take tens of
-  minutes (about 90 minutes for 14k windows). Later runs are incremental and short, because
+  minutes to over an hour on a large archive. Later runs are incremental and short, because
   unchanged windows reuse their vectors. If `katok index` fails with `semantic_index_busy`,
   another index is already running; the failure is recorded and the next run tries again.
 
