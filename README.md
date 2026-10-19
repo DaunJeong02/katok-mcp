@@ -16,7 +16,7 @@ katok-mcp/
   cli/        katok CLI (Rust). 36_katok의 entercut 브랜치를 git subtree로 가져옴(이력 보존)
   mcp/        TypeScript stdio MCP 서버. 실행 표면은 katok CLI 하나
   scripts/
-    install.sh                                   cli 빌드 → mcp 빌드 → claude mcp add
+    install.sh                                   cli 빌드 → mcp 빌드 → claude mcp add (재실행 시 기존 env 보존)
     launchd/com.enternext.katok-mcp.sync.plist.example   30분마다 sync + 첨부 보존 템플릿
   README.md   이 문서
   CLAUDE.md   저장소 전체 규칙(프라이버시·테스트·mcp 규칙)
@@ -35,10 +35,15 @@ scripts/install.sh
 
 1. `cd cli && cargo build --release` (첫 빌드는 수 분)
 2. `cd mcp && pnpm install --frozen-lockfile && pnpm build`
-3. `claude mcp add --scope user katok-mcp -- node <repo>/mcp/dist/index.js`
+3. `claude mcp add --scope user katok-mcp [-e 기존 환경변수…] -- <node 절대경로> <repo>/mcp/dist/index.js`
 
-등록에는 환경변수가 하나도 들어가지 않습니다. 키 값이 `~/.claude.json`에 평문으로 남지 않습니다.
-확인은 `claude mcp get katok-mcp`로 합니다. 다시 실행해도 안전합니다(기존 등록을 교체).
+처음 설치에는 환경변수가 하나도 들어가지 않습니다. 키 값이 `~/.claude.json`에 평문으로 남지 않습니다.
+확인은 `claude mcp get katok-mcp`로 합니다.
+
+**다시 실행해도 안전합니다.** 다시 빌드하고 기존 등록을 교체하되, 교체 전에 `claude mcp get katok-mcp`의 `Environment:` 블록을 읽어
+`KATOK_MCP_DATA_DIR`, `KATOK_MCP_ALLOWED_CHATS`, `KATOK_MCP_OUT_ROOTS` 같은 기존 환경변수를 `-e KEY=VALUE`로 그대로 다시 넘깁니다(보존한 변수 이름은 출력하고 값은 출력하지 않습니다).
+서버 명령은 설치 시점 PATH의 `node`를 `command -v node` 절대경로로 등록합니다(GUI에서 띄운 Claude Code의 PATH에 의존하지 않기 위해).
+`claude mcp add`가 실패하면 그 사실과 복구 방법을 stderr에 출력하고 **비-0으로 종료**합니다. 이때 기존 등록은 이미 지워진 상태이므로 메시지의 안내대로 다시 등록하십시오.
 
 ## 첫 실행
 
@@ -104,8 +109,10 @@ scripts/install.sh
 
 ```bash
 sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" \
+  -e "s|__DATA_DIR__|$HOME/Library/Application Support/katok-mcp|g" \
   scripts/launchd/com.enternext.katok-mcp.sync.plist.example \
   > ~/Library/LaunchAgents/com.enternext.katok-mcp.sync.plist
+# 설치 전에 plist의 EnvironmentVariables를 MCP 등록과 같은 값으로 맞추십시오 (아래)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sync.plist
 
 # 해제
@@ -113,8 +120,11 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sy
 ```
 
 - 먼저 `katok_init`을 한 번 실행해 키체인 키를 만들어 두십시오.
+- **MCP 등록 env와 같은 값을 넣으십시오.** plist 상단 `EnvironmentVariables`의 `KATOK_MCP_DATA_DIR`, `KATOK_MCP_KEYCHAIN_SERVICE`, `KATOK_MCP_KEYCHAIN_ACCOUNT`는 MCP 서버의 같은 이름 환경변수(없으면 기본값 `~/Library/Application Support/katok-mcp`, `com.enternext.katok-mcp`, `archive-key`)와 같아야 합니다. 다르면 이 작업이 서버와 다른 아카이브나 다른 키를 씁니다. 경로를 plist 본문에 하드코딩하지 않으니, 데이터 폴더를 옮기면 이 변수만 바꾸면 됩니다.
 - launchd 작업은 터미널의 Full Disk Access를 물려받지 않습니다. `/bin/bash`와 `cli/target/release/katok`에 전체 디스크 접근 권한을 주십시오.
-- 작업은 `sync --incremental` 뒤 `media backfill`(file·photo·video)을 실행하고 출력은 버립니다. 로그(`~/Library/Logs/katok-mcp-sync.log`)에는 에러만 남습니다.
+- 작업은 `sync --incremental` 뒤 `media backfill`(file·photo·video)을 실행합니다. **결과를 버리지 않습니다.**
+  - 각 단계의 stdout(katok JSON 결과: 개수·상태. 실패 시 에러 봉투도 stdout으로 나옴)는 `<데이터 폴더>/last-sync.json`(sync), `last-backfill.json`(backfill)에 매번 덮어써 저장합니다. 데이터 폴더는 0700, 파일은 0600입니다. 실행 시작 때 두 파일을 지우므로 파일이 없으면 그 단계가 실행되지 않았거나 끝나지 않은 것입니다.
+  - stderr는 `~/Library/Logs/katok-mcp-sync.log`에 남고, 작업이 중단되면 종료 코드와 시각이 한 줄 더 남습니다. 이 로그는 회전하지 않으니 가끔 비우십시오.
 
 ## 환경변수 (MCP 서버)
 
