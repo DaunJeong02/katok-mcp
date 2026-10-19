@@ -187,7 +187,7 @@ BM25 입력은 FTS5 연산식이 아니라 일반 검색어로 처리됩니다. 
 
 `katok search semantic`은 EmbeddingGemma로 만든 로컬 벡터 인덱스를 사용합니다. 표현이 정확히 기억나지 않아도 의미가 비슷한 대화를 찾을 수 있습니다.
 
-`katok index`는 새 generation을 완전히 만든 뒤 `CURRENT` 포인터를 원자적으로 교체합니다. 실패하면 이전 generation이 그대로 유지되고 명령은 non-zero로 끝납니다. `--full`은 기존 vector를 재사용하지 않는 완전 rebuild이고, 기본 index는 healthy generation의 동일 vector만 재사용하며 무결성 불일치가 있으면 archive에서 self-heal합니다.
+`katok index`는 새 generation을 완전히 만든 뒤 `CURRENT` 포인터를 원자적으로 교체합니다. 실패하면 이전 generation이 그대로 유지되고 명령은 non-zero로 끝납니다. `--full`은 기존 vector를 재사용하지 않는 완전 rebuild이고, 기본 index는 healthy generation의 동일 vector만 재사용하며 무결성 불일치가 있으면 archive에서 self-heal합니다. 인덱싱 도중 `katok sync`가 archive를 바꿔도 index는 시작 시점 스냅샷 기준으로 commit됩니다. 이후 검색은 stale로 거부하고, 다음 `katok index`가 바뀐 window만 증분으로 임베딩해 따라잡습니다.
 
 ## EmbeddingGemma 로컬 벡터 검색
 

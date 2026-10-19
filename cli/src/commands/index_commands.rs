@@ -34,7 +34,6 @@ pub(crate) fn run(
             dry_run,
             json,
             config,
-            archive: &archive,
             parents: &parents,
             semantic_dir,
             candidate_chunks,
@@ -59,7 +58,6 @@ struct LiveIndexInput<'a> {
     dry_run: bool,
     json: bool,
     config: &'a KatokConfig,
-    archive: &'a Archive,
     parents: &'a [ParentChunk],
     semantic_dir: &'a Path,
     candidate_chunks: usize,
@@ -67,7 +65,6 @@ struct LiveIndexInput<'a> {
 
 fn run_live_index(input: LiveIndexInput<'_>) -> Result<()> {
     let report = block_on(index_semantic_live_for_parents(
-        input.archive,
         input.parents,
         input.semantic_dir,
         input.config,

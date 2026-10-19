@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Index
+
+- `katok index` now validates the staged generation against the archive snapshot it
+  started from instead of re-reading the live archive at commit time. A `katok sync`
+  that lands during a long embedding pass used to fail the commit with
+  `semantic_index_stale` and discard all the staged vectors. The generation now
+  commits at the start-time revision, search reports it stale until the next
+  `katok index`, and that run reuses every unchanged vector and embeds only the
+  windows that changed. Search keeps rejecting a stale index as before.
+
 ### Send
 
 - `send --draft --image` is refused at argument parsing with a sentence that says

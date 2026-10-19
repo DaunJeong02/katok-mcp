@@ -165,6 +165,105 @@ fn stale_but_structurally_valid_generation_reuses_unchanged_vectors() {
 }
 
 #[test]
+fn index_commits_the_start_snapshot_when_the_archive_changes_during_the_run() {
+    use katok::{archive::Archive, config::KatokConfig, semantic::index_semantic_live_for_parents};
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
+    std::env::set_var("KATOK_EMBEDDER", "local-test");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = dir.path().join("data");
+    run_json(
+        &data,
+        &[
+            "sync",
+            "--source",
+            "fixture",
+            fixture("replies.jsonl").to_str().unwrap(),
+            "--json",
+        ],
+    );
+    run_json(&data, &["index", "--json"]);
+
+    // Take the snapshot an index run would start from, then let a sync change the archive
+    // before the run commits, as a concurrent `katok sync` does during a long embedding pass.
+    let archive_path = data.join("archive.sqlite3");
+    let snapshot = Archive::open(&archive_path)
+        .expect("open archive")
+        .all_parent_chunks()
+        .expect("snapshot parents");
+    let extra = dir.path().join("extra.jsonl");
+    std::fs::write(
+        &extra,
+        concat!(
+            "{\"account_hash\":\"acct\",\"chat_id\":\"chat-late\",\"chat_name\":\"Synthetic late room\",",
+            "\"chat_type\":\"group\",\"message_id\":\"late-1\",\"sender_id\":\"sender-late\",",
+            "\"sender_nickname\":\"Tester\",\"timestamp\":\"2026-01-03T00:00:00Z\",",
+            "\"text\":\"late synthetic material\",\"message_type\":\"text\",\"reply_to_message_id\":null}\n"
+        ),
+    )
+    .expect("write extra fixture");
+    run_json(
+        &data,
+        &[
+            "sync",
+            "--source",
+            "fixture",
+            extra.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let live = Archive::open(&archive_path).expect("reopen archive");
+    assert_ne!(
+        live.all_parent_chunks().expect("live parents").len(),
+        snapshot.len(),
+        "the sync must have changed the archive after the snapshot"
+    );
+
+    let before = std::fs::read(data.join("semantic/CURRENT")).expect("CURRENT before");
+    let config = KatokConfig::default();
+    let semantic_dir = data.join("semantic");
+    let mut future = std::pin::pin!(index_semantic_live_for_parents(
+        &snapshot,
+        &semantic_dir,
+        &config,
+        false,
+    ));
+    let report = match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => result.expect("commit against the start snapshot"),
+        Poll::Pending => panic!("the test embedder must not suspend"),
+    };
+    assert_eq!(report.written_documents, snapshot.len());
+    assert!(data.join("semantic/CURRENT").is_file());
+    let after = std::fs::read(data.join("semantic/CURRENT")).expect("CURRENT after");
+    assert_ne!(before, after, "a new generation is published");
+
+    let doctor = run_json(&data, &["doctor", "--json"]);
+    assert_eq!(
+        doctor["freshness"]["recommendation"]["index_before_semantic_search"],
+        true
+    );
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .env("KATOK_EMBEDDER", "local-test")
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["search", "semantic", "late synthetic material", "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("semantic index is stale"));
+
+    let next = run_json(&data, &["index", "--json"]);
+    assert!(next["reused_vectors"].as_u64().unwrap() > 0);
+    assert!(next["embedded_texts"].as_u64().unwrap() < next["written_documents"].as_u64().unwrap());
+}
+
+#[test]
 fn failed_rebuild_keeps_the_committed_generation_and_returns_json_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("data");

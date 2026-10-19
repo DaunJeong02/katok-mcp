@@ -53,11 +53,10 @@ pub async fn index_semantic_live(
     full: bool,
 ) -> Result<SemanticIndexReport> {
     let parents = archive.all_parent_chunks()?;
-    index_semantic_live_for_parents(archive, &parents, root, config, full).await
+    index_semantic_live_for_parents(&parents, root, config, full).await
 }
 
 pub async fn index_semantic_live_for_parents(
-    archive: &Archive,
     parents: &[ParentChunk],
     root: &Path,
     config: &KatokConfig,
@@ -134,7 +133,15 @@ pub async fn index_semantic_live_for_parents(
     let batch_size = config.embedding_batch_size.max(1);
     let embedding_calls = embed_pending(&store, &mut *embedder, &pending, batch_size)?;
     save_cursor(&staging, &revision, embedder.id(), embedded_texts)?;
-    validate_generation(archive, &staging, embedder.id(), config.vector_dimension)?;
+    // The archive may have changed while embedding ran, so the staged generation is checked
+    // against the snapshot this run started from. Search detects a newer archive as stale.
+    validate_staged_against_snapshot(
+        &staging,
+        embedder.id(),
+        config.vector_dimension,
+        &revision,
+        parents,
+    )?;
 
     // In keyed (private) mode the staged markdown copies of the chat text are only an
     // intermediate: the vectors are stored and validated, so the plaintext is removed before
@@ -230,6 +237,31 @@ fn validate_generation(
     if actual != expected {
         return Err(Error::SemanticIndexStale(
             "vector ids or content hashes do not match the archive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_staged_against_snapshot(
+    staging: &Path,
+    embedder_id: &str,
+    dimension: u16,
+    revision: &str,
+    parents: &[ParentChunk],
+) -> Result<()> {
+    let cursor = load_cursor(staging)?;
+    validate_cursor(&cursor, embedder_id)?;
+    if cursor.archive_revision != revision {
+        return Err(Error::SemanticIndexStale(format!(
+            "staged revision is {}, snapshot revision is {}",
+            cursor.archive_revision, revision
+        )));
+    }
+    let actual = LocalVectorStore::open_existing(&staging.join(STORE_DIR), usize::from(dimension))?
+        .content_pairs()?;
+    if actual != expected_content_pairs(parents) {
+        return Err(Error::SemanticIndexStale(
+            "staged vector ids or content hashes do not match the snapshot".to_string(),
         ));
     }
     Ok(())
