@@ -58,33 +58,32 @@ katok 아카이브가 암호화돼 있으면 katok은 `KATOK_ARCHIVE_KEY`로 아
 
 - 첫 조회 때 macOS가 `security`(또는 `node`)의 키체인 항목 접근을 묻는 팝업을 띄울 수 있습니다. **"항상 허용"**을 누르십시오. "허용"만 누르면 다음 서버 실행 때 다시 묻습니다. 팝업은 최대 60초 기다립니다.
 - 기본 키체인 항목은 enter-cut 앱의 아카이브(`~/Library/Application Support/enter-cut/katok`) 키입니다. katok 기본 아카이브(`~/Library/Application Support/katok`)는 talk-2-build의 키로 암호화돼 있어 이 키로 열리지 않습니다. 이때 서버는 "file is not a database" 에러에 `KATOK_MCP_DATA_DIR` 안내를 덧붙입니다. enter-cut 아카이브를 쓰려면 `KATOK_MCP_DATA_DIR`를 그 폴더로 지정하십시오.
-- katok은 키를 받았는데 아카이브가 평문이면 그 키로 아카이브를 **제자리 암호화**합니다(`archive.rs`의 `encrypt_in_place`). 평문 아카이브(합성 데이터 QA 등)를 쓸 때는 `KATOK_MCP_KEYCHAIN=0`을 설정하십시오.
+- katok은 키를 받았는데 아카이브가 평문이면 그 키로 아카이브를 **제자리 암호화**합니다(`archive.rs`의 `encrypt_in_place`). 서버는 키체인 키를 넣기 직전에 katok이 실제로 쓸 `<data_dir>/archive.sqlite3`의 앞 16바이트를 확인합니다. data_dir은 katok에 넘기는 `--data-dir`(`KATOK_MCP_DATA_DIR`)이고, 없으면 katok 기본 경로입니다.
+  - 헤더가 `SQLite format 3\0`(평문)이면 키를 넣지 않고 도구 호출을 거부합니다: "이 아카이브는 평문입니다. 키체인 키를 주입하면 katok이 제자리에서 암호화하므로 중단했습니다. 의도한 것이면 KATOK_ARCHIVE_KEY를 직접 설정하세요."
+  - 파일이 없으면(첫 sync 전) 키를 넣습니다. 새 아카이브가 그 키로 만들어집니다.
+  - 헤더를 읽지 못하면 거부합니다. `KATOK_ARCHIVE_KEY`를 직접 설정한 경우는 확인하지 않습니다.
 - `claude mcp add -e KATOK_ARCHIVE_KEY=…`로 넣으면 값이 `~/.claude.json`에 평문으로 저장됩니다. 키체인 폴백을 쓰면 이 설정이 필요 없습니다.
 
 ## Claude Code에 등록
 
-읽기 전용으로 등록(전송 비활성):
-
-```bash
-claude mcp add --scope user katok-mcp -- node /Users/jeongdaun/enternext/01_business/39_katok-mcp/dist/index.js
-```
-
-환경변수를 함께 등록하는 예:
-
-```bash
-claude mcp add --scope user katok-mcp \
-  -e KATOK_BIN=/Users/jeongdaun/enternext/01_business/36_katok/target/release/katok \
-  -e KATOK_MCP_ACCEPT_USE_POLICY=1 \
-  -e KATOK_MCP_ALLOWED_CHATS=1234567890,9876543210 \
-  -- node /Users/jeongdaun/enternext/01_business/39_katok-mcp/dist/index.js
-```
-
-enter-cut 아카이브를 키체인 키로 읽는 예(키 값은 등록하지 않음):
+기본 등록(전송 비활성). enter-cut 아카이브를 enter-cut 앱의 katok sidecar로 읽고, 키는 키체인에서 가져옵니다.
+키 값은 등록 설정에 들어가지 않습니다.
 
 ```bash
 claude mcp add --scope user katok-mcp \
   -e KATOK_BIN=/Users/jeongdaun/enternext/01_business/33_enter-cut/src-tauri/binaries/katok-aarch64-apple-darwin \
   -e "KATOK_MCP_DATA_DIR=/Users/jeongdaun/Library/Application Support/enter-cut/katok" \
+  -- node /Users/jeongdaun/enternext/01_business/39_katok-mcp/dist/index.js
+```
+
+draft와 전송 게이트를 함께 설정하는 예:
+
+```bash
+claude mcp add --scope user katok-mcp \
+  -e KATOK_BIN=/Users/jeongdaun/enternext/01_business/33_enter-cut/src-tauri/binaries/katok-aarch64-apple-darwin \
+  -e "KATOK_MCP_DATA_DIR=/Users/jeongdaun/Library/Application Support/enter-cut/katok" \
+  -e KATOK_MCP_ACCEPT_USE_POLICY=1 \
+  -e KATOK_MCP_ALLOWED_CHATS=1234567890,9876543210 \
   -- node /Users/jeongdaun/enternext/01_business/39_katok-mcp/dist/index.js
 ```
 

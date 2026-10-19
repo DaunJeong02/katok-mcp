@@ -7,9 +7,12 @@ import {
   createKeyProvider,
   DEFAULT_KEYCHAIN_ACCOUNT,
   DEFAULT_KEYCHAIN_SERVICE,
+  dataDirFromArgs,
+  defaultDataDir,
   isArchiveKeyFailure,
   isWrongKeyFailure,
   keychainTarget,
+  plaintextGuard,
   withArchiveKey,
 } from "../dist/archiveKey.js";
 
@@ -112,5 +115,60 @@ describe("isWrongKeyFailure", () => {
   it("matches SQLCipher's wrong-key error", () => {
     assert.ok(isWrongKeyFailure("open archive: SQLite error: file is not a database"));
     assert.ok(!isWrongKeyFailure("archive at /x is encrypted; set KATOK_ARCHIVE_KEY"));
+  });
+});
+
+describe("plaintextGuard", () => {
+  const plaintext = Buffer.from("SQLite format 3\0", "latin1");
+  const encrypted = Buffer.from([
+    0x8f, 0x12, 0xa0, 0x33, 0x01, 0xfe, 0x7c, 0x44, 0x9b, 0x00, 0x51, 0xe2, 0x6d, 0x18, 0xc7, 0x2a,
+  ]);
+  const keychain = { source: "keychain", key: SECRET };
+  const args = ["--data-dir", "/tmp/katok-guard-test", "rooms", "--json"];
+
+  function reader(result) {
+    const seen = [];
+    return {
+      seen,
+      read: (file) => {
+        seen.push(file);
+        return result;
+      },
+    };
+  }
+
+  it("refuses a Keychain key for a plaintext archive", () => {
+    const { read, seen } = reader(plaintext);
+    const refusal = plaintextGuard(keychain, args, read);
+    assert.ok(refusal?.startsWith("이 아카이브는 평문입니다."));
+    assert.ok(!refusal.includes(SECRET));
+    assert.deepEqual(seen, ["/tmp/katok-guard-test/archive.sqlite3"]);
+  });
+
+  it("injects for an encrypted header", () => {
+    assert.equal(plaintextGuard(keychain, args, reader(encrypted).read), null);
+  });
+
+  it("injects when the archive does not exist yet", () => {
+    assert.equal(plaintextGuard(keychain, args, reader(null).read), null);
+  });
+
+  it("does not check when the key comes from KATOK_ARCHIVE_KEY", () => {
+    const { read, seen } = reader(plaintext);
+    assert.equal(plaintextGuard({ source: "env" }, args, read), null);
+    assert.equal(seen.length, 0);
+  });
+
+  it("refuses when the header cannot be read", () => {
+    const read = () => {
+      throw new Error("EACCES");
+    };
+    assert.match(plaintextGuard(keychain, args, read), /EACCES/);
+  });
+
+  it("checks the same directory katok receives", () => {
+    assert.equal(dataDirFromArgs(args), "/tmp/katok-guard-test");
+    assert.equal(dataDirFromArgs(["rooms", "--json"]), defaultDataDir());
+    assert.ok(defaultDataDir().endsWith("/Library/Application Support/katok"));
   });
 });

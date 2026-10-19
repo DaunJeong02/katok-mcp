@@ -17,6 +17,7 @@ import {
   isWrongKeyFailure,
   KEY_HINT,
   type KeyResolution,
+  plaintextGuard,
   WRONG_KEY_HINT,
   withArchiveKey,
 } from "./archiveKey.js";
@@ -112,6 +113,8 @@ const archiveKey = createKeyProvider();
 export async function runKatok(args: string[], options: RunOptions = {}): Promise<unknown> {
   const baseEnv = options.env ?? process.env;
   const resolution = await archiveKey(baseEnv);
+  const refusal = plaintextGuard(resolution, args);
+  if (refusal !== null) throw new Error(refusal);
   try {
     return await execKatok(args, withArchiveKey(baseEnv, resolution), options);
   } catch (error) {

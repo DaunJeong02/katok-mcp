@@ -7,6 +7,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { closeSync, openSync, readSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 export const ARCHIVE_KEY_ENV = "KATOK_ARCHIVE_KEY";
 export const DEFAULT_KEYCHAIN_SERVICE = "com.enternext.enter-cut";
@@ -119,4 +122,74 @@ export function isWrongKeyFailure(text: string): boolean {
 /** True when a katok failure is about the archive key. */
 export function isArchiveKeyFailure(text: string): boolean {
   return text.includes(ARCHIVE_KEY_ENV) || /archive .* is encrypted/.test(text);
+}
+
+/** katok's own default when no --data-dir is given (36_katok src/paths.rs default_data_dir). */
+export function defaultDataDir(): string {
+  return path.join(os.homedir(), "Library", "Application Support", "katok");
+}
+
+/**
+ * The data directory katok will use for this exact argv. Global options come before the
+ * subcommand, so only a leading `--data-dir <dir>` counts, as katok's own parser sees it.
+ */
+export function dataDirFromArgs(args: readonly string[]): string {
+  const index = args.indexOf("--data-dir");
+  const firstNonGlobal = args.findIndex((arg) => !arg.startsWith("--"));
+  const value = index >= 0 ? args[index + 1] : undefined;
+  const isGlobal = index >= 0 && (firstNonGlobal === -1 || index < firstNonGlobal);
+  return isGlobal && value ? path.resolve(value) : defaultDataDir();
+}
+
+export const SQLITE_PLAINTEXT_HEADER = Buffer.from("SQLite format 3\0", "latin1");
+
+/** First 16 bytes of a file, or null when it does not exist. Other errors propagate. */
+export type HeaderReader = (file: string) => Buffer | null;
+
+export const readHeader: HeaderReader = (file) => {
+  let fd: number;
+  try {
+    fd = openSync(file, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const buffer = Buffer.alloc(SQLITE_PLAINTEXT_HEADER.length);
+    const read = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
+};
+
+export const PLAINTEXT_REFUSAL =
+  "이 아카이브는 평문입니다. 키체인 키를 주입하면 katok이 제자리에서 암호화하므로 중단했습니다. 의도한 것이면 KATOK_ARCHIVE_KEY를 직접 설정하세요.";
+
+/**
+ * Refuse to hand a Keychain key to katok for a plaintext archive: katok would encrypt it in
+ * place (36_katok src/archive.rs encrypt_in_place). An explicit KATOK_ARCHIVE_KEY env var is
+ * the operator's own choice and is not checked. A missing archive is fine: the first sync
+ * creates it with that key on purpose.
+ *
+ * Returns null when the call may proceed, or the refusal message.
+ */
+export function plaintextGuard(
+  resolution: KeyResolution,
+  args: readonly string[],
+  read: HeaderReader = readHeader,
+): string | null {
+  if (resolution.source !== "keychain") return null;
+  const archive = path.join(dataDirFromArgs(args), "archive.sqlite3");
+  let header: Buffer | null;
+  try {
+    header = read(archive);
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    return `${archive} 헤더를 확인하지 못해 키체인 키 주입을 중단했습니다 (could not read the archive header: ${why}).`;
+  }
+  if (header?.equals(SQLITE_PLAINTEXT_HEADER)) {
+    return `${PLAINTEXT_REFUSAL} (${archive})`;
+  }
+  return null;
 }
