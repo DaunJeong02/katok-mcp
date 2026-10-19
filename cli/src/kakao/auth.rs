@@ -44,6 +44,9 @@ pub struct ProbeStatus {
     pub container_present: bool,
     /// Count of `^[0-9a-f]{78}(?:\.db)?$` database files in the container.
     pub db_file_count: usize,
+    /// Why the container could not be listed, when it is present but unreadable.
+    /// `None` means the listing worked, so `db_file_count` is a real count.
+    pub container_read_error: Option<String>,
     /// The katok `{user_id, uuid}` auth cache file exists.
     pub auth_cached: bool,
 }
@@ -54,10 +57,14 @@ pub struct ProbeStatus {
 pub fn probe_status(home: &Path, data_dir: &Path) -> ProbeStatus {
     let container = container_dir(home);
     let container_present = container.is_dir();
-    let db_file_count = if container_present {
-        discover_database_files(&container).map_or(0, |files| files.len())
+    let (db_file_count, container_read_error) = if container_present {
+        match discover_database_files(&container) {
+            Ok(files) => (files.len(), None),
+            Err(Error::Kakao(message)) => (0, Some(message)),
+            Err(other) => (0, Some(other.to_string())),
+        }
     } else {
-        0
+        (0, None)
     };
     let app_installed = !preference_paths(home).is_empty() || container_present;
     let auth_cached = katok_cache_path(data_dir).is_file();
@@ -65,6 +72,7 @@ pub fn probe_status(home: &Path, data_dir: &Path) -> ProbeStatus {
         app_installed,
         container_present,
         db_file_count,
+        container_read_error,
         auth_cached,
     }
 }
@@ -702,11 +710,12 @@ mod tests {
         std::fs::create_dir(&container).expect("container");
         std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o000))
             .expect("chmod");
+        let listable = std::fs::read_dir(&container).is_ok();
         let outcome = discover_database_files(&container);
         // Restore so the temp dir can be removed.
         std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755))
             .expect("restore");
-        if std::fs::read_dir(&container).is_ok() && outcome.is_ok() {
+        if listable {
             // Running as root: permissions are not enforced, nothing to assert.
             return;
         }
@@ -776,6 +785,33 @@ mod tests {
         assert!(ready.container_present);
         assert_eq!(ready.db_file_count, 1);
         assert!(ready.auth_cached);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_status_surfaces_an_unreadable_container() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let data_dir = dir.path().join("data");
+        let container = container_dir(&home);
+        std::fs::create_dir_all(&container).expect("container");
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod");
+        let listable = std::fs::read_dir(&container).is_ok();
+        let status = probe_status(&home, &data_dir);
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755))
+            .expect("restore");
+        if listable {
+            return; // permissions are not enforced (running as root)
+        }
+        assert!(status.container_present);
+        assert_eq!(status.db_file_count, 0);
+        let error = status.container_read_error.expect("read error reported");
+        assert!(error.contains("os error 13"), "{error}");
+        assert!(probe_status(&home, &data_dir)
+            .container_read_error
+            .is_none());
     }
 
     #[test]

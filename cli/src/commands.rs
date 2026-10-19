@@ -411,6 +411,7 @@ fn macos_probe_payload(enabled: bool, data_dir: &Path) -> serde_json::Value {
                 "app_installed": status.app_installed,
                 "container_present": status.container_present,
                 "db_file_count": status.db_file_count,
+                "container_read_error": status.container_read_error,
                 "auth_cached": status.auth_cached
             })
         }
