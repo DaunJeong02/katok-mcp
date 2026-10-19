@@ -57,6 +57,21 @@ fn real_embedder(_config: &KatokConfig) -> Result<Box<dyn SemanticEmbedder>> {
     Err(Error::SemanticFeatureDisabled)
 }
 
+/// Where fastembed keeps the model. fastembed's own default is `.fastembed_cache` in the current
+/// directory, which re-downloads the model for every working directory (an MCP server or a
+/// launchd job starts in an arbitrary one) and drops a model folder into whatever repo that is.
+/// An explicit `FASTEMBED_CACHE_DIR` still wins; otherwise use the per-user cache directory.
+#[cfg(feature = "semantic")]
+fn model_cache_dir(
+    env_override: Option<&std::ffi::OsStr>,
+    user_cache: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if env_override.is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    user_cache.map(|dir| dir.join("katok").join("fastembed"))
+}
+
 #[cfg(feature = "semantic")]
 struct FastEmbedder {
     inner: TextEmbedding,
@@ -71,8 +86,14 @@ impl FastEmbedder {
                 config.embedder_model
             )));
         }
-        let options = TextInitOptions::new(EmbeddingModel::EmbeddingGemma300MQ4)
+        let mut options = TextInitOptions::new(EmbeddingModel::EmbeddingGemma300MQ4)
             .with_show_download_progress(false);
+        if let Some(dir) = model_cache_dir(
+            std::env::var_os("FASTEMBED_CACHE_DIR").as_deref(),
+            dirs::cache_dir(),
+        ) {
+            options = options.with_cache_dir(dir);
+        }
         let inner = TextEmbedding::try_new(options).map_err(to_embedding_error)?;
         Ok(Self { inner })
     }
@@ -163,4 +184,30 @@ fn normalize(vector: &mut [f32]) {
 #[cfg(feature = "semantic")]
 fn to_embedding_error(error: impl std::fmt::Display) -> Error {
     Error::Embedding(error.to_string())
+}
+
+#[cfg(all(test, feature = "semantic"))]
+mod tests {
+    use super::model_cache_dir;
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    #[test]
+    fn model_cache_defaults_to_the_user_cache_dir_not_the_working_directory() {
+        let dir = model_cache_dir(None, Some(PathBuf::from("/cache")));
+        assert_eq!(dir, Some(PathBuf::from("/cache/katok/fastembed")));
+        assert_eq!(
+            model_cache_dir(Some(OsStr::new("")), Some(PathBuf::from("/cache"))),
+            Some(PathBuf::from("/cache/katok/fastembed"))
+        );
+    }
+
+    #[test]
+    fn explicit_fastembed_cache_dir_and_missing_user_cache_leave_fastembed_default() {
+        assert_eq!(
+            model_cache_dir(Some(OsStr::new("/x")), Some(PathBuf::from("/cache"))),
+            None
+        );
+        assert_eq!(model_cache_dir(None, None), None);
+    }
 }

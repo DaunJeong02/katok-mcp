@@ -195,7 +195,7 @@ BM25 입력은 FTS5 연산식이 아니라 일반 검색어로 처리됩니다. 
 
 - Python 서버가 필요 없습니다.
 - Jina, TEI, 별도 로컬 HTTP embedding endpoint가 필요 없습니다.
-- 첫 실행 때 모델 artifact를 Hugging Face/fastembed cache에 내려받고, 이후에는 로컬 cache를 재사용합니다.
+- 첫 실행 때 모델 artifact를 사용자 cache 폴더(macOS: `~/Library/Caches/katok/fastembed`)에 내려받고, 이후에는 로컬 cache를 재사용합니다. 작업 디렉터리에 따라 달라지지 않으며, `FASTEMBED_CACHE_DIR`로 위치를 바꿀 수 있습니다.
 - 벡터 인덱스와 semantic documents는 사용자 Mac 안의 katok data directory에만 저장됩니다.
 
 설정 예:
