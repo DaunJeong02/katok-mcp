@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * katok-mcp: a thin stdio MCP server over the local katok KakaoTalk CLI.
+ * katok-mcp: a thin stdio MCP server over the local katok KakaoTalk CLI (cli/ in this repo).
  *
- * Every tool maps to exactly one `katok ... --json` invocation and returns katok's JSON as is.
+ * Each tool maps to `katok ... --json` invocations and wraps katok's JSON in `{ ok, data, out_dir? }`
+ * without interpreting it. katok_init and katok_sync (with_media) chain several invocations.
  * This process never opens the network, never reads KakaoTalk databases or key files, and
  * writes nothing to stdout except MCP protocol frames (diagnostics go to stderr).
  */
@@ -17,24 +18,51 @@ import {
   globalArgs,
   indexArgs,
   listWindowsArgs,
+  mediaBackfillPlan,
   mediaGetArgs,
+  mediaGetOutDir,
   messagesArgs,
   planSend,
   roomsArgs,
   searchArgs,
-  syncArgs,
+  syncPlan,
   transcriptArgs,
+  transcriptOutDir,
 } from "./args.js";
-import { DEFAULT_TIMEOUT_MS, KatokError, LONG_TIMEOUT_MS, runKatok } from "./katok.js";
+import { nextStepHint } from "./hints.js";
+import {
+  BACKFILL_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
+  KatokError,
+  LONG_TIMEOUT_MS,
+  runKatok,
+} from "./katok.js";
+import { defaultInitDeps, initialize, runSyncPlan } from "./workflows.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
-function ok(value: unknown): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+/** Every tool answers `{ ok, data, out_dir? }`; data is katok's JSON, uninterpreted. */
+const outputSchema = {
+  ok: z.boolean().describe("true when the tool succeeded (failures are returned with isError)"),
+  data: z.unknown().describe("katok's JSON output; its shape is documented by the katok CLI"),
+  out_dir: z
+    .string()
+    .optional()
+    .describe("Absolute directory on this Mac where files written by the call were saved"),
+};
+
+function ok(data: unknown, outDir?: string): CallToolResult {
+  const body = outDir === undefined ? { ok: true, data } : { ok: true, data, out_dir: outDir };
+  return {
+    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
+    structuredContent: body,
+  };
 }
 
 function fail(message: string, detail?: unknown): CallToolResult {
-  const text = detail === undefined ? message : `${message}\n\n${JSON.stringify(detail, null, 2)}`;
+  const hint = nextStepHint(`${message}\n${detail === undefined ? "" : JSON.stringify(detail)}`);
+  const head = hint === null ? message : `${message}\n\n${hint}`;
+  const text = detail === undefined ? head : `${head}\n\n${JSON.stringify(detail, null, 2)}`;
   return { isError: true, content: [{ type: "text", text }] };
 }
 
@@ -46,13 +74,15 @@ function failFrom(error: unknown): CallToolResult {
 /** Run one katok command and turn every failure into an MCP tool error. */
 async function call(
   buildArgs: () => string[],
-  options: { timeoutMs?: number; stdin?: string } = {},
+  options: { timeoutMs?: number; stdin?: string; outDir?: string } = {},
 ): Promise<CallToolResult> {
   try {
     const args = [...globalArgs(process.env), ...buildArgs()];
-    return ok(
-      await runKatok(args, { timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, ...options }),
-    );
+    const data = await runKatok(args, {
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+    });
+    return ok(data, options.outDir);
   } catch (error) {
     return failFrom(error);
   }
@@ -62,9 +92,52 @@ const rfc3339 = z.string().min(1).describe("RFC3339 timestamp, e.g. 2026-07-20T0
 const chatId = z.string().min(1).describe("chat_id as reported by katok_rooms or a search hit");
 const limit = z.number().int().positive().max(100_000);
 
-const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
+/** Reads the local archive only. */
+const READ_ONLY = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+/** Writes local files, never deletes, same arguments end in the same state. */
+const LOCAL_WRITE = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+/** Like LOCAL_WRITE, but may also reach the Kakao CDN or a model download. */
+const NETWORK_WRITE = { ...LOCAL_WRITE, openWorldHint: true } as const;
 
 const server = new McpServer({ name: "katok-mcp", version: VERSION });
+
+server.registerTool(
+  "katok_init",
+  {
+    title: "katok init",
+    description: [
+      "One-time setup of the dedicated katok-mcp archive (default data dir ~/Library/Application Support/katok-mcp, or KATOK_MCP_DATA_DIR).",
+      "If neither KATOK_ARCHIVE_KEY nor the Keychain item (service com.enternext.katok-mcp, account archive-key) holds a key, generates a random one with `openssl rand -hex 32` and stores it in the macOS Keychain; the key value is never returned or logged.",
+      "Then creates the data directory, runs `katok sync --source macos --json` once and returns `katok doctor --json`.",
+      "Already initialized (archive exists)? It only returns doctor and syncs nothing.",
+      "Requires Full Disk Access for the process that launched this server (Terminal / Claude Code). The first run can raise macOS prompts (TCC 'access data from other apps', Keychain access): ask the user to allow them, choosing 'Always Allow' for Keychain.",
+      "Refuses to create a new key when an archive already exists without a Keychain key, because that would orphan or silently re-encrypt it. The first sync can take minutes (600 s timeout).",
+    ].join(" "),
+    inputSchema: {},
+    outputSchema,
+    annotations: LOCAL_WRITE,
+  },
+  async () => {
+    try {
+      const result = await initialize(defaultInitDeps(process.env));
+      return ok(result);
+    } catch (error) {
+      return failFrom(error);
+    }
+  },
+);
 
 server.registerTool(
   "katok_doctor",
@@ -78,6 +151,7 @@ server.registerTool(
         .optional()
         .describe("Add --macos-probe. May raise a macOS TCC prompt. Default false."),
     },
+    outputSchema,
     annotations: READ_ONLY,
   },
   async ({ probe }) => call(() => doctorArgs({ probe })),
@@ -87,17 +161,37 @@ server.registerTool(
   "katok_sync",
   {
     title: "katok sync",
-    description:
-      "Run `katok sync --source macos --json`: copy new messages from the live macOS KakaoTalk database into the local katok archive. Requires Full Disk Access for the process that launches this server (terminal / Claude Code). Writes only to the local katok archive; may take minutes on the first run (600 s timeout).",
+    description: [
+      "Run `katok sync --source macos --json`: copy new messages from the live macOS KakaoTalk database into the local katok archive. Requires Full Disk Access for the process that launches this server (terminal / Claude Code). Writes only to the local archive; may take minutes on the first run (600 s timeout). Run katok_init first on a fresh setup.",
+      "Result data is { sync, backfill? }.",
+      "with_media: true then runs `katok media backfill` (all kinds, output <data_dir>/media) after a successful sync and returns both results plus out_dir. This reaches the Kakao CDN (the only network access) and can download a lot; use katok_media_backfill with dry_run first when the size is unknown.",
+    ].join(" "),
     inputSchema: {
       incremental: z
         .boolean()
         .optional()
         .describe("Add --incremental: read only rows added since the last sync."),
+      with_media: z
+        .boolean()
+        .optional()
+        .describe(
+          "After a successful sync, also download attachments (photos, videos, files) whose CDN link is still valid. Default false.",
+        ),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    outputSchema,
+    annotations: NETWORK_WRITE,
   },
-  async ({ incremental }) => call(() => syncArgs({ incremental }), { timeoutMs: LONG_TIMEOUT_MS }),
+  async (input) => {
+    try {
+      const steps = syncPlan(input, process.env);
+      const outcome = await runSyncPlan(steps, (args, options) =>
+        runKatok([...globalArgs(process.env), ...args], options),
+      );
+      return ok(outcome.data, outcome.out_dir);
+    } catch (error) {
+      return failFrom(error);
+    }
+  },
 );
 
 server.registerTool(
@@ -107,6 +201,7 @@ server.registerTool(
     description:
       "Run `katok rooms --json`: every chat in the archive with chat_id, chat_name, chat_type (direct/group/self), message_count and newest message time. Reads the archive, not live KakaoTalk; run katok_sync first when recency matters.",
     inputSchema: {},
+    outputSchema,
     annotations: READ_ONLY,
   },
   async () => call(() => roomsArgs()),
@@ -126,6 +221,7 @@ server.registerTool(
         .optional()
         .describe("Max rows from the newest end of the range (katok default 500)"),
     },
+    outputSchema,
     annotations: READ_ONLY,
   },
   async (input) => call(() => messagesArgs(input)),
@@ -150,6 +246,7 @@ server.registerTool(
       limit: limit.optional().describe("Number of hits (katok default 10)"),
       chat_id: chatId.optional().describe("Restrict hits to one chat_id (keyword/bm25 only)"),
     },
+    outputSchema,
     annotations: READ_ONLY,
   },
   async (input) => {
@@ -182,7 +279,8 @@ server.registerTool(
       full: z.boolean().optional().describe("Add --full: rebuild every vector"),
       dry_run: z.boolean().optional().describe("Add --dry-run"),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    outputSchema,
+    annotations: NETWORK_WRITE,
   },
   async (input) => call(() => indexArgs(input), { timeoutMs: LONG_TIMEOUT_MS }),
 );
@@ -199,6 +297,7 @@ server.registerTool(
       redact: z.boolean().optional().describe("Add --redact (get only)"),
       include_message_ids: z.boolean().optional().describe("Add --include-message-ids (get only)"),
     },
+    outputSchema,
     annotations: READ_ONLY,
   },
   async (input) => call(() => chunkArgs(input)),
@@ -209,7 +308,7 @@ server.registerTool(
   {
     title: "katok transcript",
     description:
-      "Run `katok transcript --chat <id> [--since] [--out <dir>] --json`: export one chat's messages as a Markdown file and report its path. Reads the archive; a range with no messages writes no file.",
+      "Run `katok transcript --chat <id> [--since] [--out <dir>] --json`: export one chat's messages as a Markdown file and report its path. Reads the archive; a range with no messages writes no file. Default folder <data_dir>/transcripts, reported as out_dir.",
     inputSchema: {
       chat_id: chatId,
       since: rfc3339.optional(),
@@ -217,11 +316,13 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Directory to write into (default: katok data dir)"),
+        .describe("Directory to write into (default: <data_dir>/transcripts)"),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    outputSchema,
+    annotations: LOCAL_WRITE,
   },
-  async (input) => call(() => transcriptArgs(input)),
+  async (input) =>
+    call(() => transcriptArgs(input), { outDir: transcriptOutDir(input, process.env) }),
 );
 
 server.registerTool(
@@ -229,7 +330,7 @@ server.registerTool(
   {
     title: "katok media get",
     description:
-      "Run `katok media get --chat <id> [--kind ...] [--out <dir>] [--no-cdn] --json`: extract photos, albums, videos and file attachments of one chat. Without no_cdn, katok may GET the attachment's presigned Kakao CDN URL (the only network access in katok); set no_cdn: true to stay fully local. File attachments have no local cache, so no_cdn returns nothing for them.",
+      "Run `katok media get --chat <id> [--log <logId>] [--kind ...] [--out <dir>] [--no-cdn] [--limit N] --json`: extract photos, albums, videos and file attachments of ONE chat (use katok_media_backfill for every room). Without no_cdn, katok may GET the attachment's presigned Kakao CDN URL (the only network access in katok); set no_cdn: true to stay fully local. File attachments have no local cache, so no_cdn returns nothing for them. Files land in out_dir (default <data_dir>/media/<chat_id>).",
     inputSchema: {
       chat_id: chatId,
       kind: z
@@ -238,12 +339,61 @@ server.registerTool(
         .describe("Default: every kind"),
       out_dir: z.string().min(1).optional(),
       no_cdn: z.boolean().optional(),
-      log_id: z.string().min(1).optional().describe("Extract one media message by logId"),
-      limit: limit.optional(),
+      log_id: z
+        .string()
+        .regex(/^\d+$/, "log_id is the numeric logId of one media message")
+        .optional()
+        .describe("Extract one media message by logId (--log)"),
+      limit: limit
+        .optional()
+        .describe("Max media messages read from the room (katok default 5000)"),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    outputSchema,
+    annotations: NETWORK_WRITE,
   },
-  async (input) => call(() => mediaGetArgs(input)),
+  async (input) => call(() => mediaGetArgs(input), { outDir: mediaGetOutDir(input, process.env) }),
+);
+
+server.registerTool(
+  "katok_media_backfill",
+  {
+    title: "katok media backfill",
+    description: [
+      "Run `katok media backfill [--chat] [--kind ...] [--dry-run] [--max-bytes] [--limit] --out <dir> --json`: save every attachment whose download link is still valid, across all rooms (or one with chat_id).",
+      "File attachments have no local cache and their CDN signed link expires (about 14 days, then HTTP 410 and the file is gone for good), so they must be fetched soon after they are received. Photos and videos have only a lazily filled local cache and the same expiring link.",
+      "Kinds default to all three (file, photo, video). Files already saved are skipped without a network call, so re-running is free and resumes an interrupted run.",
+      "Use dry_run: true first: it sends no request and reports tier_totals (planned/existing/stub counts), kinds and total bytes so the user can judge the size before anything is downloaded.",
+      "Output goes to out_dir (default <data_dir>/media, one <chat_id> folder per room), also returned as out_dir. The only network access is the Kakao CDN download. Timeout 30 minutes.",
+    ].join(" "),
+    inputSchema: {
+      chat_id: chatId.optional().describe("Limit to one room (default: every room with media)"),
+      kind: z
+        .array(z.enum(["photo", "video", "file"]))
+        .optional()
+        .describe("Kinds to save (default: file, photo and video)"),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe("Report what would be fetched without downloading anything"),
+      max_bytes: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Refuse attachments larger than this many bytes (katok default 512 MiB)"),
+      limit: limit
+        .max(1_000_000)
+        .optional()
+        .describe("Max media messages read per room (katok default 100000)"),
+      out_dir: z.string().min(1).optional().describe("Root folder (default: <data_dir>/media)"),
+    },
+    outputSchema,
+    annotations: NETWORK_WRITE,
+  },
+  async (input) => {
+    const plan = mediaBackfillPlan(input, process.env);
+    return call(() => plan.args, { timeoutMs: BACKFILL_TIMEOUT_MS, outDir: plan.out_dir });
+  },
 );
 
 server.registerTool(
@@ -251,9 +401,10 @@ server.registerTool(
   {
     title: "katok list windows",
     description:
-      "Run `katok send --list-windows --json`: list the KakaoTalk chat windows currently open. Read only; needs Accessibility permission. Sends nothing.",
+      "Run `katok send --list-windows --json`: list the KakaoTalk chat windows currently open. Read only; needs Accessibility permission (`katok permissions macos --accessibility` opens the settings). Sends nothing.",
     inputSchema: {},
-    annotations: READ_ONLY,
+    outputSchema,
+    annotations: { ...READ_ONLY, openWorldHint: true },
   },
   async () => call(() => listWindowsArgs()),
 );
@@ -267,7 +418,7 @@ server.registerTool(
       "mode dry_run (default): `katok send --chat <id> --dry-run --no-open --json` — resolves the room only.",
       "mode draft: pastes text into the compose box without sending (--draft --accept-use-policy). Text only.",
       "mode send: delivers the message. Refused unless confirm is true AND the server env has KATOK_MCP_ALLOW_SEND=1.",
-      "draft and send are refused unless the server env has KATOK_MCP_ACCEPT_USE_POLICY=1 (the user accepted 36_katok/ACCEPTABLE_USE_POLICY.md and DISCLAIMER.md), and, when KATOK_MCP_ALLOWED_CHATS is set, unless chat_id is in that list.",
+      "draft and send are refused unless the server env has KATOK_MCP_ACCEPT_USE_POLICY=1 (the user accepted cli/ACCEPTABLE_USE_POLICY.md and cli/DISCLAIMER.md), and, when KATOK_MCP_ALLOWED_CHATS is set, unless chat_id is in that list.",
       "allow_open defaults to false, which adds --no-open so a closed room is never opened on screen.",
       "Never infer send permission from a search or summary request; confirm the exact room and final text with the user first. No loops, bulk or scheduled sends.",
     ].join(" "),
@@ -288,7 +439,13 @@ server.registerTool(
         .describe("Allow katok to open a closed room window (default false → --no-open)"),
       take_focus_now: z.boolean().optional().describe("Add --take-focus-now"),
     },
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    outputSchema,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async (input) => {
     const plan = planSend(input, process.env);

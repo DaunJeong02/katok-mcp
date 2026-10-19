@@ -1,7 +1,7 @@
 {
   "name": "katok-mcp",
-  "version": "0.1.0",
-  "description": "Thin stdio MCP server that wraps the local katok KakaoTalk CLI",
+  "version": "0.2.0",
+  "description": "stdio MCP server that wraps the katok KakaoTalk CLI in this monorepo",
   "private": true,
   "type": "module",
   "license": "MIT",
