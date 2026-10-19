@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+# Never commit katok output: archives, transcripts, media, or keys.
+katok-out/
+*.sqlite3
+*.sqlite3-*
+.env
+.env.*
