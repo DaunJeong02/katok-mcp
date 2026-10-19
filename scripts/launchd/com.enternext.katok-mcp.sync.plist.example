@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template: every 30 minutes, sync new KakaoTalk messages and save the attachments
+  (files, photos, videos) whose download link is still valid. Attachment links expire, so a
+  regular backfill is how files get kept. This file is only a template; nothing installs it.
+
+  Install (see README.md, "30분마다 자동 동기화"):
+    1. Replace __REPO__ with the absolute path of this repository and __HOME__ with your home.
+    2. Save as ~/Library/LaunchAgents/com.enternext.katok-mcp.sync.plist
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sync.plist
+  Remove:
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sync.plist
+
+  Full Disk Access is NOT inherited from your terminal: grant it to /bin/bash and to
+  __REPO__/cli/target/release/katok. Run katok_init once first, so the Keychain key exists.
+  Output is discarded; only error messages (never message content) reach the log below.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.enternext.katok-mcp.sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>set -eu
+BIN="__REPO__/cli/target/release/katok"
+DATA="__HOME__/Library/Application Support/katok-mcp"
+KATOK_ARCHIVE_KEY="$(/usr/bin/security find-generic-password -s com.enternext.katok-mcp -a archive-key -w)"
+export KATOK_ARCHIVE_KEY
+"$BIN" --data-dir "$DATA" sync --source macos --incremental --json &gt;/dev/null
+"$BIN" --data-dir "$DATA" media backfill --kind file --kind photo --kind video --out "$DATA/media" --json &gt;/dev/null</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/katok-mcp-sync.log</string>
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+</dict>
+</plist>
