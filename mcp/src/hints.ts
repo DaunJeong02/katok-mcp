@@ -32,3 +32,18 @@ export function nextStepHint(text: string): string | null {
   }
   return null;
 }
+
+/**
+ * What to tell the caller when katok_send's katok call fails. A failed send may still have
+ * reached the room (a timeout fires after the paste), so this never suggests narrowing the
+ * request or repeating it: the generic rules above are not used for katok_send.
+ */
+export function sendFailureHint(mode: "dry_run" | "draft" | "send"): string {
+  if (mode === "send") {
+    return "다음 행동: 전송됐는지 알 수 없습니다. 카카오톡에서 해당 방에 메시지가 실제로 갔는지 먼저 확인하고, 가지 않은 것을 확인한 뒤에만 다시 시도하세요. 같은 인자로 바로 반복하면 중복 전송될 수 있습니다.";
+  }
+  if (mode === "draft") {
+    return "다음 행동: 초안이 입력창에 이미 들어갔을 수 있습니다. 카카오톡 입력창을 확인한 뒤에만 다시 시도하세요 (중복 입력 방지).";
+  }
+  return "다음 행동: dry_run은 아무것도 보내지 않습니다. 카카오톡 앱이 실행 중인지, Accessibility 권한(`katok permissions macos --accessibility`)이 있는지 확인한 뒤 다시 시도하세요.";
+}

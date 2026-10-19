@@ -29,7 +29,7 @@ import {
   transcriptArgs,
   transcriptOutDir,
 } from "./args.js";
-import { nextStepHint } from "./hints.js";
+import { nextStepHint, sendFailureHint } from "./hints.js";
 import {
   BACKFILL_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
@@ -37,6 +37,7 @@ import {
   LONG_TIMEOUT_MS,
   runKatok,
 } from "./katok.js";
+import { createLock, type Lock } from "./lock.js";
 import { defaultInitDeps, initialize, runSyncPlan } from "./workflows.js";
 
 const VERSION = "0.2.0";
@@ -59,33 +60,66 @@ function ok(data: unknown, outDir?: string): CallToolResult {
   };
 }
 
-function fail(message: string, detail?: unknown): CallToolResult {
-  const hint = nextStepHint(`${message}\n${detail === undefined ? "" : JSON.stringify(detail)}`);
+/**
+ * A tool error. `hintOverride` replaces the generic next-step hint (katok_send must never be
+ * told to narrow or repeat the call).
+ */
+function fail(message: string, detail?: unknown, hintOverride?: string): CallToolResult {
+  const hint =
+    hintOverride ??
+    nextStepHint(`${message}\n${detail === undefined ? "" : JSON.stringify(detail)}`);
   const head = hint === null ? message : `${message}\n\n${hint}`;
   const text = detail === undefined ? head : `${head}\n\n${JSON.stringify(detail, null, 2)}`;
   return { isError: true, content: [{ type: "text", text }] };
 }
 
-function failFrom(error: unknown): CallToolResult {
-  if (error instanceof KatokError) return fail(error.message, error.detail);
-  return fail(error instanceof Error ? error.message : String(error));
+function failFrom(error: unknown, hintOverride?: string): CallToolResult {
+  if (error instanceof KatokError) return fail(error.message, error.detail, hintOverride);
+  return fail(error instanceof Error ? error.message : String(error), undefined, hintOverride);
 }
 
-/** Run one katok command and turn every failure into an MCP tool error. */
-async function call(
-  buildArgs: () => string[],
-  options: { timeoutMs?: number; stdin?: string; outDir?: string } = {},
+/**
+ * Two process-wide locks. Tools that drive the KakaoTalk UI share one; tools that write the
+ * archive or files share the other. Read tools take neither.
+ */
+const uiLock: Lock = createLock();
+const writeLock: Lock = createLock();
+
+interface Prepared {
+  args: string[];
+  stdin?: string;
+  outDir?: string;
+}
+
+/**
+ * Run one katok command and turn every failure into an MCP tool error. `prepare` runs inside
+ * the lock and the error handler, so an invalid out_dir becomes a tool error too.
+ */
+async function callPrepared(
+  prepare: () => Prepared,
+  options: { timeoutMs?: number; lock?: Lock; failureHint?: string } = {},
 ): Promise<CallToolResult> {
-  try {
-    const args = [...globalArgs(process.env), ...buildArgs()];
-    const data = await runKatok(args, {
-      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
-    });
-    return ok(data, options.outDir);
-  } catch (error) {
-    return failFrom(error);
-  }
+  const run = async (): Promise<CallToolResult> => {
+    try {
+      const prepared = prepare();
+      const data = await runKatok([...globalArgs(process.env), ...prepared.args], {
+        timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(prepared.stdin === undefined ? {} : { stdin: prepared.stdin }),
+      });
+      return ok(data, prepared.outDir);
+    } catch (error) {
+      return failFrom(error, options.failureHint);
+    }
+  };
+  return options.lock ? options.lock(run) : run();
+}
+
+/** callPrepared for the common case: argv only. */
+function call(
+  buildArgs: () => string[],
+  options: { timeoutMs?: number; lock?: Lock } = {},
+): Promise<CallToolResult> {
+  return callPrepared(() => ({ args: buildArgs() }), options);
 }
 
 const rfc3339 = z.string().min(1).describe("RFC3339 timestamp, e.g. 2026-07-20T00:00:00+09:00");
@@ -131,7 +165,7 @@ server.registerTool(
   },
   async () => {
     try {
-      const result = await initialize(defaultInitDeps(process.env));
+      const result = await writeLock(() => initialize(defaultInitDeps(process.env)));
       return ok(result);
     } catch (error) {
       return failFrom(error);
@@ -184,8 +218,10 @@ server.registerTool(
   async (input) => {
     try {
       const steps = syncPlan(input, process.env);
-      const outcome = await runSyncPlan(steps, (args, options) =>
-        runKatok([...globalArgs(process.env), ...args], options),
+      const outcome = await writeLock(() =>
+        runSyncPlan(steps, (args, options) =>
+          runKatok([...globalArgs(process.env), ...args], options),
+        ),
       );
       return ok(outcome.data, outcome.out_dir);
     } catch (error) {
@@ -282,7 +318,7 @@ server.registerTool(
     outputSchema,
     annotations: NETWORK_WRITE,
   },
-  async (input) => call(() => indexArgs(input), { timeoutMs: LONG_TIMEOUT_MS }),
+  async (input) => call(() => indexArgs(input), { timeoutMs: LONG_TIMEOUT_MS, lock: writeLock }),
 );
 
 server.registerTool(
@@ -316,13 +352,21 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Directory to write into (default: <data_dir>/transcripts)"),
+        .describe(
+          "Directory to write into (default: <data_dir>/transcripts). Must be inside the data dir or a root listed in the server env KATOK_MCP_OUT_ROOTS (colon separated); `~` is the home directory.",
+        ),
     },
     outputSchema,
     annotations: LOCAL_WRITE,
   },
   async (input) =>
-    call(() => transcriptArgs(input), { outDir: transcriptOutDir(input, process.env) }),
+    callPrepared(
+      () => ({
+        args: transcriptArgs(input, process.env),
+        outDir: transcriptOutDir(input, process.env),
+      }),
+      { lock: writeLock },
+    ),
 );
 
 server.registerTool(
@@ -337,7 +381,13 @@ server.registerTool(
         .array(z.enum(["photo", "video", "file"]))
         .optional()
         .describe("Default: every kind"),
-      out_dir: z.string().min(1).optional(),
+      out_dir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Directory to write into (default: <data_dir>/media/<chat_id>). Must be inside the data dir or a root listed in the server env KATOK_MCP_OUT_ROOTS (colon separated); `~` is the home directory.",
+        ),
       no_cdn: z.boolean().optional(),
       log_id: z
         .string()
@@ -351,7 +401,14 @@ server.registerTool(
     outputSchema,
     annotations: NETWORK_WRITE,
   },
-  async (input) => call(() => mediaGetArgs(input), { outDir: mediaGetOutDir(input, process.env) }),
+  async (input) =>
+    callPrepared(
+      () => ({
+        args: mediaGetArgs(input, process.env),
+        outDir: mediaGetOutDir(input, process.env),
+      }),
+      { lock: writeLock },
+    ),
 );
 
 server.registerTool(
@@ -388,15 +445,25 @@ server.registerTool(
         .max(1_000_000)
         .optional()
         .describe("Max media messages read per room (katok default 100000)"),
-      out_dir: z.string().min(1).optional().describe("Root folder (default: <data_dir>/media)"),
+      out_dir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Root folder (default: <data_dir>/media). Must be inside the data dir or a root listed in the server env KATOK_MCP_OUT_ROOTS (colon separated); `~` is the home directory.",
+        ),
     },
     outputSchema,
     annotations: NETWORK_WRITE,
   },
-  async (input) => {
-    const plan = mediaBackfillPlan(input, process.env);
-    return call(() => plan.args, { timeoutMs: BACKFILL_TIMEOUT_MS, outDir: plan.out_dir });
-  },
+  async (input) =>
+    callPrepared(
+      () => {
+        const plan = mediaBackfillPlan(input, process.env);
+        return { args: plan.args, outDir: plan.out_dir };
+      },
+      { timeoutMs: BACKFILL_TIMEOUT_MS, lock: writeLock },
+    ),
 );
 
 server.registerTool(
@@ -409,7 +476,7 @@ server.registerTool(
     outputSchema,
     annotations: { ...READ_ONLY, openWorldHint: true },
   },
-  async () => call(() => listWindowsArgs()),
+  async () => call(() => listWindowsArgs(), { lock: uiLock }),
 );
 
 server.registerTool(
@@ -424,6 +491,7 @@ server.registerTool(
       "draft and send are refused unless the server env has KATOK_MCP_ACCEPT_USE_POLICY=1 (the user accepted cli/ACCEPTABLE_USE_POLICY.md and cli/DISCLAIMER.md), and, when KATOK_MCP_ALLOWED_CHATS is set, unless chat_id is in that list.",
       "allow_open defaults to false, which adds --no-open so a closed room is never opened on screen.",
       "Never infer send permission from a search or summary request; confirm the exact room and final text with the user first. No loops, bulk or scheduled sends.",
+      "If this tool fails (even by timeout) the message may still have been delivered: check KakaoTalk before trying again, never retry blindly.",
     ].join(" "),
     inputSchema: {
       chat_id: chatId.optional().describe("Preferred: unambiguous room id"),
@@ -453,7 +521,11 @@ server.registerTool(
   async (input) => {
     const plan = planSend(input, process.env);
     if (!plan.ok) return fail(`katok_send refused: ${plan.reason}`);
-    return call(() => plan.args, { stdin: plan.stdin });
+    // A failed send may still have reached the room: no retry or narrowing hint, only "check first".
+    return callPrepared(() => ({ args: plan.args, stdin: plan.stdin }), {
+      lock: uiLock,
+      failureHint: sendFailureHint(plan.mode),
+    });
   },
 );
 

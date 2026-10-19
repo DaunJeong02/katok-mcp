@@ -61,6 +61,16 @@ scripts/install.sh
 | 트랜스크립트 | `<데이터 폴더>/transcripts/` |
 | 아카이브 키 | macOS 키체인 service `com.enternext.katok-mcp`, account `archive-key` |
 
+### 파일을 쓰는 위치 (`out_dir`)
+
+`katok_transcript`, `katok_media_get`, `katok_media_backfill`의 `out_dir`는 **데이터 폴더 하위**이거나, 서버 환경변수 `KATOK_MCP_OUT_ROOTS`(콜론 `:` 구분 절대경로 목록)에 적힌 폴더의 하위일 때만 허용합니다.
+`~`는 홈 폴더로 확장하고, 심볼릭 링크는 따라간 실제 경로로 비교하며, 상대경로 항목은 무시합니다. 벗어나면 katok을 띄우지 않고 허용되는 위치를 알려 주며 거부합니다. `out_dir`를 생략하면 기본 위치(`<데이터 폴더>/transcripts`, `<데이터 폴더>/media`)를 씁니다.
+데이터 폴더 밖으로 내보내려면 예를 들어: `claude mcp add --scope user katok-mcp -e KATOK_MCP_OUT_ROOTS=~/Documents/katok-export -- node <repo>/mcp/dist/index.js`
+
+### 동시 호출
+
+한 서버 프로세스 안에서 도구 호출을 두 줄로 직렬화합니다. `katok_send`·`katok_list_windows`는 카카오톡 화면을 조작하므로 한 줄(`uiLock`), `katok_init`·`katok_sync`·`katok_index`·`katok_media_get`·`katok_media_backfill`·`katok_transcript`는 아카이브·파일을 쓰므로 다른 한 줄(`writeLock`)로 호출 순서대로 하나씩 실행합니다. 읽기 도구(`rooms`, `messages`, `search`, `chunk`, `doctor`)는 기다리지 않습니다. 여러 Claude Code 세션이 각자 서버를 띄우는 경우는 프로세스 간이라 이 락이 막지 못합니다.
+
 키 우선순위: 서버 환경의 `KATOK_ARCHIVE_KEY` → 키체인 → 없음.
 
 키체인 조회 캐시:
@@ -115,6 +125,7 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sy
 | `KATOK_ARCHIVE_KEY` | 아카이브 키. 있으면 키체인보다 우선 |
 | `KATOK_MCP_KEYCHAIN` | `0`이면 키체인 조회 끔 |
 | `KATOK_MCP_KEYCHAIN_SERVICE` / `_ACCOUNT` | 키체인 항목 변경(기본 `com.enternext.katok-mcp` / `archive-key`) |
+| `KATOK_MCP_OUT_ROOTS` | 데이터 폴더 밖에서 `out_dir`로 허용할 폴더들(콜론 구분 절대경로, `~` 가능) |
 | `KATOK_MCP_ACCEPT_USE_POLICY` | `1`일 때만 draft·send 허용(정책 문서에 동의했다는 뜻) |
 | `KATOK_MCP_ALLOW_SEND` | `1`일 때만 `mode: "send"` 허용 |
 | `KATOK_MCP_ALLOWED_CHATS` | 쉼표 구분 chat_id 목록. 설정하면 목록 밖 방으로의 draft·send 거부, `room` 이름 지정도 거부 |
@@ -154,6 +165,7 @@ annotations 열은 읽기전용 / 파괴적 / 멱등 / 외부(open world) 순서
 | `send` | `send --chat <id> [--image <path>] --no-open --accept-use-policy --json` | `confirm: true` **그리고** `KATOK_MCP_ALLOW_SEND=1` **그리고** `KATOK_MCP_ACCEPT_USE_POLICY=1`, 허용 목록 통과 |
 
 - 모든 거부는 katok 프로세스를 띄우기 전에 서버 안에서 일어납니다.
+- **전송이 실패·타임아웃이어도 메시지는 이미 갔을 수 있습니다.** 그래서 `katok_send` 실패에는 "범위를 줄여 재시도" 같은 안내를 붙이지 않고, 카카오톡에서 전송 여부를 먼저 확인한 뒤에만 재시도하라는 안내를 붙입니다.
 - `allow_open`이 false면 `--no-open`을 붙입니다. 닫힌 방은 화면에 열지 않고 실패합니다.
 - `draft`에서 `image_path`는 거부합니다. katok은 `--image`가 있으면 `--draft`와 관계없이 이미지를 전송하기 때문입니다.
 - 정책 동의 환경변수가 없으면 `cli/ACCEPTABLE_USE_POLICY.md`, `cli/DISCLAIMER.md` 경로를 알려 주며 거부합니다.

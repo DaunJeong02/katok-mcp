@@ -56,12 +56,12 @@ describe("read commands", () => {
       "5",
       "--json",
     ]);
-    assert.deepEqual(transcriptArgs({ chat_id: "42", out_dir: "/tmp/x" }), [
+    assert.deepEqual(transcriptArgs({ chat_id: "42", out_dir: `${defaultDataDir()}/x` }, {}), [
       "transcript",
       "--chat",
       "42",
       "--out",
-      "/tmp/x",
+      `${defaultDataDir()}/x`,
       "--json",
     ]);
     assert.deepEqual(indexArgs({ full: true }), ["index", "--full", "--json"]);
@@ -96,7 +96,10 @@ describe("read commands", () => {
 
   it("media get repeats --kind", () => {
     assert.deepEqual(
-      mediaGetArgs({ chat_id: "9", kind: ["photo", "file"], no_cdn: true, out_dir: "/o" }),
+      mediaGetArgs(
+        { chat_id: "9", kind: ["photo", "file"], no_cdn: true, out_dir: `${defaultDataDir()}/o` },
+        {},
+      ),
       [
         "media",
         "get",
@@ -107,7 +110,7 @@ describe("read commands", () => {
         "--kind",
         "file",
         "--out",
-        "/o",
+        `${defaultDataDir()}/o`,
         "--no-cdn",
         "--json",
       ],

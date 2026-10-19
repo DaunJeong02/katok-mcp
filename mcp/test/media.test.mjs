@@ -35,7 +35,7 @@ describe("mediaBackfillPlan", () => {
     });
   });
 
-  it("maps every option and resolves a relative out_dir", () => {
+  it("maps every option", () => {
     const plan = mediaBackfillPlan(
       {
         chat_id: "42",
@@ -43,7 +43,7 @@ describe("mediaBackfillPlan", () => {
         dry_run: true,
         max_bytes: 1000,
         limit: 7,
-        out_dir: "/tmp/elsewhere",
+        out_dir: "/tmp/katok-mcp-test/elsewhere",
       },
       ENV,
     );
@@ -60,11 +60,10 @@ describe("mediaBackfillPlan", () => {
       "--limit",
       "7",
       "--out",
-      "/tmp/elsewhere",
+      "/tmp/katok-mcp-test/elsewhere",
       "--json",
     ]);
-    assert.equal(plan.out_dir, "/tmp/elsewhere");
-    assert.ok(mediaBackfillPlan({ out_dir: "rel/dir" }, ENV).out_dir.startsWith("/"));
+    assert.equal(plan.out_dir, "/tmp/katok-mcp-test/elsewhere");
   });
 
   it("an empty kind list falls back to every kind", () => {
@@ -79,7 +78,7 @@ describe("mediaBackfillPlan", () => {
 
 describe("media get / transcript output directories", () => {
   it("media get exposes --log and --limit and reports katok's default folder", () => {
-    const args = mediaGetArgs({ chat_id: "42", log_id: "99", limit: 3 });
+    const args = mediaGetArgs({ chat_id: "42", log_id: "99", limit: 3 }, ENV);
     assert.deepEqual(args, [
       "media",
       "get",
@@ -92,12 +91,18 @@ describe("media get / transcript output directories", () => {
       "--json",
     ]);
     assert.equal(mediaGetOutDir({ chat_id: "42" }, ENV), "/tmp/katok-mcp-test/media/42");
-    assert.equal(mediaGetOutDir({ chat_id: "42", out_dir: "/o" }, ENV), "/o");
+    assert.equal(
+      mediaGetOutDir({ chat_id: "42", out_dir: "/tmp/katok-mcp-test/o" }, ENV),
+      "/tmp/katok-mcp-test/o",
+    );
   });
 
   it("transcript defaults to <data_dir>/transcripts", () => {
     assert.equal(transcriptOutDir({}, ENV), "/tmp/katok-mcp-test/transcripts");
-    assert.equal(transcriptOutDir({ out_dir: "/o" }, ENV), "/o");
+    assert.equal(
+      transcriptOutDir({ out_dir: "/tmp/katok-mcp-test/o" }, ENV),
+      "/tmp/katok-mcp-test/o",
+    );
   });
 });
 
@@ -171,5 +176,18 @@ describe("nextStepHint", () => {
 
   it("has nothing to say about unrelated text", () => {
     assert.equal(nextStepHint("something else entirely"), null);
+  });
+});
+
+describe("hints", () => {
+  it("a timeout hint for other tools suggests narrowing; katok_send's never does", async () => {
+    const { sendFailureHint } = await import("../dist/hints.js");
+    assert.match(nextStepHint("katok timed out or was killed (SIGTERM) after 1 ms"), /범위를 줄여/);
+    for (const mode of ["dry_run", "draft", "send"]) {
+      const hint = sendFailureHint(mode);
+      assert.ok(!hint.includes("범위를 줄여"), mode);
+      assert.ok(!hint.includes("같은 인자로 반복"), mode);
+    }
+    assert.match(sendFailureHint("send"), /먼저 확인하고.*뒤에만/);
   });
 });

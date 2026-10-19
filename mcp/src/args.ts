@@ -6,8 +6,10 @@
  */
 
 import path from "node:path";
+import { resolveOutDir } from "./outDir.js";
 import { dataDir, type Env, mediaDir, POLICY_FILES, transcriptDir } from "./paths.js";
 
+export { allowedOutRoots, OUT_ROOTS_ENV, OutDirError, resolveOutDir } from "./outDir.js";
 export { POLICY_FILES };
 
 /**
@@ -54,7 +56,7 @@ export function mediaBackfillPlan(
   input: MediaBackfillInput,
   env: Env,
 ): { args: string[]; out_dir: string } {
-  const outDir = input.out_dir ? path.resolve(input.out_dir) : mediaDir(env);
+  const outDir = input.out_dir ? resolveOutDir(input.out_dir, env) : mediaDir(env);
   const kinds = input.kind && input.kind.length > 0 ? input.kind : ALL_MEDIA_KINDS;
   const args = ["media", "backfill"];
   if (input.chat_id) args.push("--chat", input.chat_id);
@@ -153,30 +155,38 @@ export function chunkArgs(input: {
   return args;
 }
 
-export function transcriptArgs(input: {
-  chat_id: string;
-  since?: string;
-  out_dir?: string;
-}): string[] {
+/** Throws OutDirError when `out_dir` is outside the data dir and KATOK_MCP_OUT_ROOTS. */
+export function transcriptArgs(
+  input: {
+    chat_id: string;
+    since?: string;
+    out_dir?: string;
+  },
+  env: Env,
+): string[] {
   const args = ["transcript", "--chat", input.chat_id];
   if (input.since) args.push("--since", input.since);
-  if (input.out_dir) args.push("--out", input.out_dir);
+  if (input.out_dir) args.push("--out", resolveOutDir(input.out_dir, env));
   args.push("--json");
   return args;
 }
 
-export function mediaGetArgs(input: {
-  chat_id: string;
-  kind?: MediaKind[];
-  out_dir?: string;
-  no_cdn?: boolean;
-  log_id?: string;
-  limit?: number;
-}): string[] {
+/** Throws OutDirError when `out_dir` is outside the data dir and KATOK_MCP_OUT_ROOTS. */
+export function mediaGetArgs(
+  input: {
+    chat_id: string;
+    kind?: MediaKind[];
+    out_dir?: string;
+    no_cdn?: boolean;
+    log_id?: string;
+    limit?: number;
+  },
+  env: Env,
+): string[] {
   const args = ["media", "get", "--chat", input.chat_id];
   if (input.log_id) args.push("--log", input.log_id);
   for (const kind of input.kind ?? []) args.push("--kind", kind);
-  if (input.out_dir) args.push("--out", input.out_dir);
+  if (input.out_dir) args.push("--out", resolveOutDir(input.out_dir, env));
   if (input.no_cdn === true) args.push("--no-cdn");
   if (input.limit !== undefined) args.push("--limit", String(input.limit));
   args.push("--json");
@@ -185,12 +195,14 @@ export function mediaGetArgs(input: {
 
 /** Where `katok media get` writes when no --out is given (cli/src/commands/media_commands.rs). */
 export function mediaGetOutDir(input: { chat_id: string; out_dir?: string }, env: Env): string {
-  return input.out_dir ? path.resolve(input.out_dir) : path.join(mediaDir(env), input.chat_id);
+  return input.out_dir
+    ? resolveOutDir(input.out_dir, env)
+    : path.join(mediaDir(env), input.chat_id);
 }
 
 /** Where `katok transcript` writes when no --out is given. */
 export function transcriptOutDir(input: { out_dir?: string }, env: Env): string {
-  return input.out_dir ? path.resolve(input.out_dir) : transcriptDir(env);
+  return input.out_dir ? resolveOutDir(input.out_dir, env) : transcriptDir(env);
 }
 
 export function listWindowsArgs(): string[] {
