@@ -7,9 +7,9 @@ use crate::cli::MediaCommand;
 use crate::support::print_payload;
 use katok::kakao::{
     media_paths::MediaDirs,
-    media_reader::read_media_chat_ids_with_options,
     media_resolver::{MediaKind, MediaReport, MediaResolveOptions, MediaTier},
-    read_media_frames_with_options, AuthOptions, MediaQuery,
+    read_media_chat_ids_resolved, read_media_frames_resolved, read_media_frames_with_options,
+    AuthOptions, MediaQuery,
 };
 
 pub(crate) fn run(command: MediaCommand, data_dir: &Path) -> Result<()> {
@@ -124,9 +124,17 @@ fn run_backfill(
     let auth_options = AuthOptions::new(home.clone(), data_dir.to_path_buf());
     let root = out.unwrap_or_else(|| data_dir.join("media"));
 
+    // Auth lists the KakaoTalk container, so it is resolved once and shared by
+    // the room listing and every per-room read below.
+    // The failure keeps the context the first read would have given it.
+    let resolved = katok::kakao::auth::resolve_auth(&auth_options).with_context(|| match chat {
+        Some(id) => format!("read media rows for chat {id}"),
+        None => "list KakaoTalk rooms holding media".to_string(),
+    })?;
+
     let chat_ids = match chat {
         Some(id) => vec![id],
-        None => read_media_chat_ids_with_options(&auth_options, &kinds)
+        None => read_media_chat_ids_resolved(&resolved, &kinds)
             .context("list KakaoTalk rooms holding media")?,
     };
 
@@ -146,7 +154,7 @@ fn run_backfill(
             limit,
             kinds: kinds.clone(),
         };
-        let frames = read_media_frames_with_options(&auth_options, &query)
+        let frames = read_media_frames_resolved(&resolved, &query)
             .with_context(|| format!("read media rows for chat {chat_id}"))?;
         if frames.is_empty() {
             continue;

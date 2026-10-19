@@ -19,7 +19,8 @@ use katok::kakao::{
         resolve_media_frames_with_fetcher, MediaFrameInput, MediaKind, MediaRecord,
         MediaResolveOptions, MediaTier,
     },
-    read_media_frames_with_options, AuthOptions, MediaQuery,
+    read_media_chat_ids_resolved, read_media_frames_resolved, read_media_frames_with_options,
+    AuthOptions, MediaQuery,
 };
 use rusqlite::{params, Connection};
 use sha1::{Digest as Sha1Digest, Sha1};
@@ -863,5 +864,47 @@ fn incomplete_cached_video_is_replaced_from_the_cdn() {
     assert_eq!(
         std::fs::read(record.path.as_ref().expect("cdn path")).expect("cdn body"),
         complete_mp4()
+    );
+}
+
+/// A run over many rooms resolves auth once. With the container no longer
+/// listable (search-only permission), reads on the resolved auth still work,
+/// which shows they do not list it again, while a fresh resolve reports why it
+/// failed instead of "no database files".
+#[cfg(unix)]
+#[test]
+fn resolved_auth_serves_every_room_without_listing_the_container_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = create_fixture();
+    let options = auth_options(&fixture);
+    let resolved = auth::resolve_auth(&options).expect("resolve once");
+    let container = auth::container_dir(&fixture.home);
+
+    std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o300))
+        .expect("drop list permission");
+    let listable = std::fs::read_dir(&container).is_ok();
+    let outcome = (|| {
+        let chat_ids = read_media_chat_ids_resolved(&resolved, &MediaKind::ALL)?;
+        let first = read_media_frames_resolved(&resolved, &media_query(None))?;
+        let second = read_media_frames_resolved(&resolved, &media_query(None))?;
+        Ok::<_, katok::Error>((chat_ids, first.len(), second.len()))
+    })();
+    let fresh = auth::resolve_auth(&options);
+    std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755))
+        .expect("restore permissions");
+
+    if listable {
+        return; // permissions are not enforced (running as root)
+    }
+    let (chat_ids, first, second) = outcome.expect("reads reuse the resolved auth");
+    assert_eq!(chat_ids, vec![CHAT_ID]);
+    assert_eq!((first, second), (9, 9));
+    let message = fresh
+        .expect_err("a fresh resolve must list the container")
+        .to_string();
+    assert!(
+        message.contains("container directory could not be read"),
+        "{message}"
     );
 }

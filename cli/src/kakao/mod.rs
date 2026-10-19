@@ -25,7 +25,10 @@ use crate::types::SourceCursor;
 use crate::{Error, Result};
 
 pub use auth::{probe_status, AuthOptions, DatabaseKey, ProbeStatus, ResolvedAuth};
-pub use media_reader::{read_media_frames_with_options, MediaQuery};
+pub use media_reader::{
+    read_media_chat_ids_resolved, read_media_frames_resolved, read_media_frames_with_options,
+    MediaQuery,
+};
 pub use reader::{ChatRecord, ReaderOutput};
 
 /// Resolve auth and read every openable KakaoTalk database for `home`/`data_dir`.

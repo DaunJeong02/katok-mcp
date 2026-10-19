@@ -72,6 +72,16 @@ pub fn read_media_frames_with_options(
     query: &MediaQuery,
 ) -> Result<Vec<MediaFrameInput>> {
     let resolved = auth::resolve_auth(options)?;
+    read_media_frames_resolved(&resolved, query)
+}
+
+/// [`read_media_frames_with_options`] for a caller that already holds the
+/// resolved auth. A run over many rooms resolves once and reuses it, instead of
+/// listing the container again for every room.
+pub fn read_media_frames_resolved(
+    resolved: &auth::ResolvedAuth,
+    query: &MediaQuery,
+) -> Result<Vec<MediaFrameInput>> {
     read_media_frames_with_key(&resolved.database_files, &resolved.key, query)
 }
 
@@ -192,6 +202,14 @@ pub fn read_media_chat_ids_with_options(
     kinds: &[MediaKind],
 ) -> Result<Vec<i64>> {
     let resolved = auth::resolve_auth(options)?;
+    read_media_chat_ids_resolved(&resolved, kinds)
+}
+
+/// [`read_media_chat_ids_with_options`] for a caller that already holds the resolved auth.
+pub fn read_media_chat_ids_resolved(
+    resolved: &auth::ResolvedAuth,
+    kinds: &[MediaKind],
+) -> Result<Vec<i64>> {
     let key = resolved.key.as_str();
     let query = MediaQuery {
         chat_id: 0,
