@@ -331,7 +331,9 @@ pub(crate) enum MediaCommand {
         /// kind with no local cache to fall back on.
         #[arg(long = "kind", value_name = "KIND")]
         kinds: Vec<String>,
-        /// Report what would be fetched without downloading anything.
+        /// Report which tier each frame would reach and what would be fetched, without
+        /// downloading or writing anything: no request is sent and no file is written, local
+        /// cache copies included.
         #[arg(long)]
         dry_run: bool,
         /// Refuse to download an attachment larger than this many bytes.

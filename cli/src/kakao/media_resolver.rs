@@ -104,9 +104,15 @@ pub struct MediaResolveOptions {
     /// This is what makes a re-run of `media backfill` free and idempotent.
     pub skip_existing: bool,
     /// Evaluate every tier precondition but perform no request and write no
-    /// file. A frame that would have been downloaded lands in
+    /// file — not for the CDN tier and not for the local cache tiers either.
+    /// A frame that would have been downloaded lands in
     /// [`MediaTier::Planned`] instead, so a preview distinguishes "would fetch"
     /// from "expired" — which switching the CDN tier off cannot do.
+    ///
+    /// A cached `full` or `thumb` file is still decrypted, in memory only, so
+    /// the preview reports the tier a real run would reach (a partial video
+    /// download, for one, is only detectable on the decrypted body). Those
+    /// records carry no `path`, since nothing exists at the would-be location.
     pub dry_run: bool,
 }
 
@@ -499,9 +505,9 @@ where
                         frame.output_stem,
                         image_ext(&body)
                     ));
-                    write_image(&body, &out)?;
+                    let path = persist_unless_dry_run(options, &body, out)?;
                     return Ok((
-                        record(frame, MediaTier::Full, "decrypted", Some(out), &body),
+                        record(frame, MediaTier::Full, "decrypted", path, &body),
                         errors,
                     ));
                 }
@@ -602,10 +608,10 @@ where
                         frame.output_stem,
                         image_ext(&body)
                     ));
-                    write_image(&body, &out)?;
+                    let path = persist_unless_dry_run(options, &body, out)?;
                     let reason = join_reasons(why.iter().map(String::as_str));
                     return Ok((
-                        record(frame, MediaTier::Thumb, &reason, Some(out), &body),
+                        record(frame, MediaTier::Thumb, &reason, path, &body),
                         errors,
                     ));
                 }
@@ -710,6 +716,21 @@ fn verify_cdn_checksum(body: &[u8], expected: &str) -> Result<()> {
             actual
         )))
     }
+}
+
+/// Write a decrypted local-cache body to `out`, or — in a dry run — write
+/// nothing and report no path. The CDN branch never reaches here in a dry run:
+/// it returns [`MediaTier::Planned`] before fetching.
+fn persist_unless_dry_run(
+    options: &MediaResolveOptions,
+    body: &[u8],
+    out: PathBuf,
+) -> Result<Option<PathBuf>> {
+    if options.dry_run {
+        return Ok(None);
+    }
+    write_image(body, &out)?;
+    Ok(Some(out))
 }
 
 fn write_image(body: &[u8], out: &Path) -> Result<()> {

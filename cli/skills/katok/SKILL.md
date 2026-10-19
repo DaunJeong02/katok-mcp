@@ -149,11 +149,11 @@ Three practical notes for video:
 A presigned URL lasts roughly 14 days. For a video that means falling back to whatever is cached; for a file, which has no cache, expiry is permanent loss. `katok media backfill` exists for that window:
 
 ```
-katok media backfill --dry-run --json    # what would be fetched, no requests at all
+katok media backfill --dry-run --json    # what would be fetched: no requests, no files written
 katok media backfill --json              # every room, live links only, kind=file by default
 ```
 
-It walks every room holding media, skips anything already saved without a network call — so re-running is idempotent and resumes an interrupted run — and reports per-tier totals. `--dry-run` distinguishes `planned` (would fetch) from `stub`/`cdn-expired` (already gone), which switching the CDN tier off cannot do.
+It walks every room holding media, skips anything already saved without a network call — so re-running is idempotent and resumes an interrupted run — and reports per-tier totals. `--dry-run` writes nothing to `--out` (local-cache copies are decrypted in memory only, to pick the tier) and distinguishes `planned` (would fetch) from `stub`/`cdn-expired` (already gone), which switching the CDN tier off cannot do.
 
 Run it on a schedule if attachments matter. A backfill started after the window has closed cannot recover anything: report the expired count honestly rather than implying the files can be retrieved.
 

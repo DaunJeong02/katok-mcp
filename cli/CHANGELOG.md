@@ -53,6 +53,10 @@
 
 ### Media
 
+- `media backfill --dry-run` no longer writes anything. It used to skip only the
+  CDN request and still decrypted every local-cache `full`/`thumb` photo and
+  video into `--out`. The local tiers are now resolved in memory only, so the
+  tier counts are unchanged, and their records carry no `path`.
 - A cached video that decrypts but has no complete top-level `moov` box is no
   longer reported as `full`. It is recorded as `full-incomplete`, nothing is
   written for it, and the CDN and thumbnail tiers are tried instead.

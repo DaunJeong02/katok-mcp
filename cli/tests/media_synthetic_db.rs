@@ -671,6 +671,66 @@ fn dry_run_previews_the_fetch_without_writing_or_requesting() {
     assert!(!fixture.output_dir.exists(), "a dry run writes nothing");
 }
 
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[test]
+fn dry_run_reports_local_cache_tiers_without_writing_any_file() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(None, &[MediaKind::Photo]),
+    )
+    .expect("read photo frames");
+    // The output directory already exists and is empty, as it does for a
+    // caller that points `--out` at a scratch directory: the check below is
+    // about files, not about whether the directory was created.
+    std::fs::create_dir_all(&fixture.output_dir).expect("empty output dir");
+    let options = MediaResolveOptions {
+        skip_existing: true,
+        dry_run: true,
+        ..resolve_options(fixture.output_dir.clone())
+    };
+
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &options,
+        |_, _, _| panic!("a dry run must not fetch"),
+    )
+    .expect("dry run");
+
+    // The local tiers are still resolved and counted, so the preview names the
+    // tier a real run would reach...
+    assert_eq!(report.tier_counts.get("full"), Some(&2));
+    assert_eq!(report.tier_counts.get("planned"), Some(&2));
+    assert_eq!(report.tier_counts.get("thumb"), Some(&1));
+    assert_eq!(report.tier_counts.get("stub"), Some(&1));
+    let full = record(&report, LOG_FULL, 0);
+    assert_eq!(full.tier, MediaTier::Full);
+    assert_eq!(full.sha1.as_deref(), Some(sha1_hex(FULL_IMAGE).as_str()));
+    // ...but there is no output file to point at.
+    assert!(report.records.iter().all(|record| record.path.is_none()));
+    assert!(
+        files_under(&fixture.output_dir).is_empty(),
+        "a dry run must not write decrypted cache bodies"
+    );
+}
+
 /// One ISO-BMFF box with a 32-bit size header.
 fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
