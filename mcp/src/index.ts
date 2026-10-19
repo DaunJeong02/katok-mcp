@@ -362,7 +362,8 @@ server.registerTool(
       "Run `katok media backfill [--chat] [--kind ...] [--dry-run] [--max-bytes] [--limit] --out <dir> --json`: save every attachment whose download link is still valid, across all rooms (or one with chat_id).",
       "File attachments have no local cache and their CDN signed link expires (about 14 days, then HTTP 410 and the file is gone for good), so they must be fetched soon after they are received. Photos and videos have only a lazily filled local cache and the same expiring link.",
       "Kinds default to all three (file, photo, video). Files already saved are skipped without a network call, so re-running is free and resumes an interrupted run.",
-      "Use dry_run: true first: it sends no request and reports tier_totals (planned/existing/stub counts), kinds and total bytes so the user can judge the size before anything is downloaded.",
+      "Use dry_run: true first: it sends no network request and reports tier_totals (planned = would be downloaded from the CDN, stub = expired or unavailable, existing = already saved) and bytes (the CDN download size) so the user can judge the size before anything is downloaded.",
+      "Caveat (katok behaviour): dry_run still decrypts photos and videos that are already in KakaoTalk's local cache (tiers full/thumb) into out_dir; only the CDN download is skipped. kind: ['file'] has no local cache, so a file-only dry run writes nothing.",
       "Output goes to out_dir (default <data_dir>/media, one <chat_id> folder per room), also returned as out_dir. The only network access is the Kakao CDN download. Timeout 30 minutes.",
     ].join(" "),
     inputSchema: {
@@ -374,7 +375,9 @@ server.registerTool(
       dry_run: z
         .boolean()
         .optional()
-        .describe("Report what would be fetched without downloading anything"),
+        .describe(
+          "Send no network request and report what would be downloaded. Photos/videos already in KakaoTalk's local cache are still written to out_dir.",
+        ),
       max_bytes: z
         .number()
         .int()
