@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  LaunchAgent template: every 30 minutes, sync new KakaoTalk messages and save the attachments
-  (files, photos, videos) whose download link is still valid. Attachment links expire, so a
-  regular backfill is how files get kept. This file is only a template; nothing installs it.
+  LaunchAgent template: every 30 minutes, sync new KakaoTalk messages, save the attachments
+  (files, photos, videos) whose download link is still valid, then update the semantic index.
+  Attachment links expire, so a regular backfill is how files get kept. This file is only a
+  template; nothing installs it.
+
+  The index step runs `katok index`. The first index embeds every window and can take tens of
+  minutes (about 90 minutes for 14k windows). Later runs are incremental and short, because
+  unchanged windows reuse their vectors. If `katok index` fails with `semantic_index_busy`,
+  another index is already running; the failure is recorded and the next run tries again.
 
   Install (see README.md, "30분마다 자동 동기화"):
     1. Replace __REPO__ with the absolute path of this repository, __HOME__ with your home and
@@ -26,10 +32,10 @@
 
   Where the output goes:
     - stdout of each step (katok's JSON result, counts and status, no message text) is saved,
-      overwritten on every run, to $KATOK_MCP_DATA_DIR/last-sync.json (sync) and
-      last-backfill.json (media backfill). The folder is made 0700 and the files 0600.
-      A failing step prints its error envelope on stdout too, so the failure is in that file.
-      Both files are deleted at the start of a run, so a missing file means that step did not run
+      overwritten on every run, to $KATOK_MCP_DATA_DIR/last-sync.json (sync),
+      last-backfill.json (media backfill) and last-index.json (index). The folder is made 0700
+      and the files 0600. A failing step prints its error envelope on stdout too, so the
+      failure is in that file. All three files are deleted at the start of a run, so a missing file means that step did not run
       or did not finish (the log says why).
     - stderr goes to the log below, plus one "failed" line with the exit code and time when the
       job stops. The log is never rotated; truncate it now and then.
@@ -62,11 +68,12 @@ ACCOUNT="${KATOK_MCP_KEYCHAIN_ACCOUNT:?}"
 trap 'echo "katok-mcp sync failed (exit $?) at $(date -u +%FT%TZ); see the log and $DATA/last-*.json" &gt;&amp;2' ERR
 mkdir -p "$DATA"
 chmod 700 "$DATA"
-rm -f "$DATA/last-sync.json" "$DATA/last-backfill.json"
+rm -f "$DATA/last-sync.json" "$DATA/last-backfill.json" "$DATA/last-index.json"
 KATOK_ARCHIVE_KEY="$(/usr/bin/security find-generic-password -s "$SERVICE" -a "$ACCOUNT" -w)"
 export KATOK_ARCHIVE_KEY
 "$BIN" --data-dir "$DATA" sync --source macos --incremental --json &gt;"$DATA/last-sync.json"
-"$BIN" --data-dir "$DATA" media backfill --kind file --kind photo --kind video --out "$DATA/media" --json &gt;"$DATA/last-backfill.json"</string>
+"$BIN" --data-dir "$DATA" media backfill --kind file --kind photo --kind video --out "$DATA/media" --json &gt;"$DATA/last-backfill.json"
+"$BIN" --data-dir "$DATA" index --json &gt;"$DATA/last-index.json"</string>
   </array>
 
   <key>StartInterval</key>
