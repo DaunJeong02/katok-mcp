@@ -10,7 +10,7 @@ Claude Code 같은 MCP 클라이언트가 `katok`의 검색·조회·전송 기�
 
 ## 동작 원칙
 
-- 실행 표면은 `katok` CLI 하나입니다. 서버는 카카오 DB, 키 파일, 키체인을 직접 읽지 않습니다.
+- 실행 표면은 `katok` CLI 하나입니다. 서버는 카카오 DB와 키 파일을 직접 읽지 않습니다. 아카이브 키만 `/usr/bin/security`로 키체인에서 읽을 수 있습니다(아래 참고).
 - 서버 자체는 네트워크를 쓰지 않습니다. `katok media get`은 `no_cdn: true`가 아니면 첨부의 presigned CDN URL을 받을 수 있습니다(katok의 유일한 네트워크 경로).
 - 모든 호출에 `--json`을 붙이고, stdout JSON을 그대로 도구 결과로 돌려줍니다.
 - 비JSON 출력, non-zero exit, 타임아웃, katok의 `{"ok": false, "error": …}` 응답은 모두 MCP 도구 에러(`isError: true`)가 됩니다. 에러 본문에는 exit code, stderr, stdout 앞부분, katok 에러 객체가 들어갑니다.
@@ -41,10 +41,25 @@ pnpm build
 
 ## 아카이브 키 (`KATOK_ARCHIVE_KEY`)
 
-katok 아카이브가 암호화돼 있으면 `rooms`·`messages`·`search`·`chunk`·`transcript`·`send --chat` 등이
-`archive … is encrypted; set KATOK_ARCHIVE_KEY` 에러를 냅니다. 서버는 자기 환경변수를 `katok`에 그대로
-넘기므로, 키는 서버 환경에 `KATOK_ARCHIVE_KEY`로 주면 됩니다. 서버가 키를 찾아 읽지는 않습니다.
-`claude mcp add -e KATOK_ARCHIVE_KEY=…`로 넣으면 값이 `~/.claude.json`에 평문으로 저장된다는 점에 유의하십시오.
+katok 아카이브가 암호화돼 있으면 katok은 `KATOK_ARCHIVE_KEY`로 아카이브를 엽니다.
+서버는 이 키를 다음 순서로 공급합니다.
+
+1. **환경변수**: 서버 환경에 `KATOK_ARCHIVE_KEY`가 있으면 그 값을 그대로 씁니다. 키체인은 조회하지 않습니다.
+2. **macOS 키체인**: 환경변수가 없으면 `/usr/bin/security find-generic-password -s <service> -a <account> -w`로 한 번 읽습니다.
+   기본값은 service `com.enternext.enter-cut`, account `katok-archive-key`입니다.
+   `KATOK_MCP_KEYCHAIN_SERVICE`, `KATOK_MCP_KEYCHAIN_ACCOUNT`로 바꿉니다.
+   서버 프로세스가 살아 있는 동안 결과(성공·실패)를 메모리에 캐시합니다. 실패 뒤에 다시 읽게 하려면 서버를 재시작합니다.
+3. **없음**: 키체인 조회가 실패하면 키 없이 실행합니다. katok이 암호화 에러를 내면 서버가
+   "KATOK_ARCHIVE_KEY 환경변수 또는 키체인 항목이 필요" 안내와 실패 이유를 덧붙입니다.
+
+`KATOK_MCP_KEYCHAIN=0`이면 키체인 조회를 끕니다. 키 값은 로그, 에러, 도구 결과 어디에도 나오지 않습니다.
+
+주의할 점:
+
+- 첫 조회 때 macOS가 `security`(또는 `node`)의 키체인 항목 접근을 묻는 팝업을 띄울 수 있습니다. **"항상 허용"**을 누르십시오. "허용"만 누르면 다음 서버 실행 때 다시 묻습니다. 팝업은 최대 60초 기다립니다.
+- 기본 키체인 항목은 enter-cut 앱의 아카이브(`~/Library/Application Support/enter-cut/katok`) 키입니다. katok 기본 아카이브(`~/Library/Application Support/katok`)는 talk-2-build의 키로 암호화돼 있어 이 키로 열리지 않습니다. 이때 서버는 "file is not a database" 에러에 `KATOK_MCP_DATA_DIR` 안내를 덧붙입니다. enter-cut 아카이브를 쓰려면 `KATOK_MCP_DATA_DIR`를 그 폴더로 지정하십시오.
+- katok은 키를 받았는데 아카이브가 평문이면 그 키로 아카이브를 **제자리 암호화**합니다(`archive.rs`의 `encrypt_in_place`). 평문 아카이브(합성 데이터 QA 등)를 쓸 때는 `KATOK_MCP_KEYCHAIN=0`을 설정하십시오.
+- `claude mcp add -e KATOK_ARCHIVE_KEY=…`로 넣으면 값이 `~/.claude.json`에 평문으로 저장됩니다. 키체인 폴백을 쓰면 이 설정이 필요 없습니다.
 
 ## Claude Code에 등록
 
@@ -64,6 +79,15 @@ claude mcp add --scope user katok-mcp \
   -- node /Users/jeongdaun/enternext/01_business/39_katok-mcp/dist/index.js
 ```
 
+enter-cut 아카이브를 키체인 키로 읽는 예(키 값은 등록하지 않음):
+
+```bash
+claude mcp add --scope user katok-mcp \
+  -e KATOK_BIN=/Users/jeongdaun/enternext/01_business/33_enter-cut/src-tauri/binaries/katok-aarch64-apple-darwin \
+  -e "KATOK_MCP_DATA_DIR=/Users/jeongdaun/Library/Application Support/enter-cut/katok" \
+  -- node /Users/jeongdaun/enternext/01_business/39_katok-mcp/dist/index.js
+```
+
 실제 전송까지 열려면 `-e KATOK_MCP_ALLOW_SEND=1`을 추가합니다. 확인은 `claude mcp list` 또는 `claude mcp get katok-mcp`로 합니다.
 
 ### 환경변수
@@ -71,7 +95,10 @@ claude mcp add --scope user katok-mcp \
 | 변수 | 뜻 |
 |---|---|
 | `KATOK_BIN` | katok 실행 파일 경로(선택) |
-| `KATOK_ARCHIVE_KEY` | katok 아카이브 키. 서버는 값을 katok에 넘기기만 함 |
+| `KATOK_ARCHIVE_KEY` | katok 아카이브 키. 있으면 키체인보다 우선 |
+| `KATOK_MCP_KEYCHAIN` | `0`이면 키체인 조회 끔 |
+| `KATOK_MCP_KEYCHAIN_SERVICE` | 키체인 service (기본 `com.enternext.enter-cut`) |
+| `KATOK_MCP_KEYCHAIN_ACCOUNT` | 키체인 account (기본 `katok-archive-key`) |
 | `KATOK_MCP_DATA_DIR` | 설정하면 모든 호출에 `--data-dir <값>`을 붙임(합성 데이터 QA용) |
 | `KATOK_MCP_ACCEPT_USE_POLICY` | `1`일 때만 draft·send에 `--accept-use-policy`를 붙임. 없으면 draft·send 거부 |
 | `KATOK_MCP_ALLOW_SEND` | `1`일 때만 `mode: "send"` 허용 |

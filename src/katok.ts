@@ -11,6 +11,15 @@ import { execFile } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  createKeyProvider,
+  isArchiveKeyFailure,
+  isWrongKeyFailure,
+  KEY_HINT,
+  type KeyResolution,
+  WRONG_KEY_HINT,
+  withArchiveKey,
+} from "./archiveKey.js";
 import { KATOK_REPO } from "./args.js";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -28,6 +37,7 @@ export class KatokError extends Error {
       stderr: string;
       stdoutHead: string;
       katokError?: unknown;
+      keyHint?: string;
     },
   ) {
     super(message);
@@ -91,8 +101,38 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-export function runKatok(args: string[], options: RunOptions = {}): Promise<unknown> {
-  const env = options.env ?? process.env;
+/** One Keychain lookup per server process. */
+const archiveKey = createKeyProvider();
+
+/**
+ * Run katok with KATOK_ARCHIVE_KEY supplied from the env or the Keychain. When no key is
+ * available and katok fails on the encrypted archive, the error gains a hint and the reason
+ * the key is missing. The key itself never enters the error.
+ */
+export async function runKatok(args: string[], options: RunOptions = {}): Promise<unknown> {
+  const baseEnv = options.env ?? process.env;
+  const resolution = await archiveKey(baseEnv);
+  try {
+    return await execKatok(args, withArchiveKey(baseEnv, resolution), options);
+  } catch (error) {
+    throw addKeyHint(error, resolution);
+  }
+}
+
+function addKeyHint(error: unknown, resolution: KeyResolution): unknown {
+  if (!(error instanceof KatokError)) return error;
+  const text = `${error.message}\n${error.detail.stderr}\n${error.detail.stdoutHead}`;
+  let hint: string | null = null;
+  if (resolution.source === "none" && isArchiveKeyFailure(text)) {
+    hint = resolution.reason ? `${KEY_HINT} ${resolution.reason}` : KEY_HINT;
+  } else if (resolution.source === "keychain" && isWrongKeyFailure(text)) {
+    hint = WRONG_KEY_HINT;
+  }
+  if (hint === null) return error;
+  return new KatokError(`${error.message}. ${hint}`, { ...error.detail, keyHint: hint });
+}
+
+function execKatok(args: string[], env: NodeJS.ProcessEnv, options: RunOptions): Promise<unknown> {
   const bin = resolveBin(env);
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 

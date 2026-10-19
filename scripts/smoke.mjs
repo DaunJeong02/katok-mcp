@@ -79,7 +79,10 @@ if (rooms.isError) {
 } else {
   const body = JSON.parse(textOf(rooms));
   const list = Array.isArray(body) ? body : (body.rooms ?? []);
+  const byType = {};
+  for (const room of list) byType[room.chat_type] = (byType[room.chat_type] ?? 0) + 1;
   console.log(`isError: false, rooms: ${list.length}`);
+  console.log(`chat_type distribution: ${JSON.stringify(byType)}`);
   if (list[0]) console.log(`row fields: ${Object.keys(list[0]).join(", ")}`);
 }
 
