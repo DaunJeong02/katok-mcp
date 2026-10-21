@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### CLI
+
+- `katok --version` (and `-V`) prints `katok <version>` from `Cargo.toml` and exits 0.
+
 ### Sync
 
 - `katok sync --chat <chat_id>` (repeatable) reads and archives only the named chats. The
@@ -26,6 +30,10 @@
   what the owner has read is not settled, so all three are reported; log ids are decimal
   strings, missing values `null`. Every macOS sync, incremental or not, re-reads them for all
   rooms it covers and stores them on existing `chats` rows only.
+- `katok rooms --json` adds `member_count` (`activeMembersCount`, owner included),
+  `member_user_ids` (the `displayMemberIds` preview without the owner, as decimal strings; a
+  direct chat without a preview gives its peer) and `is_open_chat` (`linkId != 0`), stored and
+  refreshed the same way. `ChatReadState` is renamed `ChatRoomState` to carry them.
 
 ### Doctor
 
@@ -35,6 +43,15 @@
   database file: `status` `ok`/`denied`/`missing`/`error`, the step that failed and its
   errno. Without the flag it is `not_checked`: opening the container is what raises the macOS
   prompt, and a plain `doctor` stays prompt-free.
+
+### Sync range
+
+- `katok sync --chat <chat_id> --since <unix_ms>` stores a chat the archive does not hold yet
+  (no message, no floor) only from that send time on. The time is kept as the chat's floor in a
+  new `chat_floors` table and every later sync drops rows before it, whatever the read path:
+  cursors keep advancing to the newest row, and the re-read margin, replaced rows and late
+  arrivals cannot bring older rows back. A chat already in the archive ignores `--since`;
+  `forget` removes the floor, so changing a range is forget then sync with the new `--since`.
 
 ### Forget
 

@@ -1,6 +1,6 @@
 use crate::kakao::{AuthOptions, ReaderOutput};
 use crate::{
-    types::{ChatReadState, RawMessage, SourceCursor},
+    types::{ChatRoomState, RawMessage, SourceCursor},
     Result,
 };
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ pub trait SourceAdapter {
             messages: self.messages()?,
             cursors: Vec::new(),
             incremental: false,
-            read_states: Vec::new(),
+            room_states: Vec::new(),
         })
     }
 
@@ -32,7 +32,7 @@ pub trait SourceAdapter {
         let mut read = self.messages_since(cursors)?;
         read.messages
             .retain(|message| chat_ids.contains(&message.chat_id));
-        read.read_states
+        read.room_states
             .retain(|state| chat_ids.contains(&state.chat_id));
         Ok(read)
     }
@@ -45,8 +45,8 @@ pub struct SourceRead {
     pub cursors: Vec<SourceCursor>,
     /// Every database was read past a cursor that still held, not in full.
     pub incremental: bool,
-    /// Each room's read position. Empty for a source that has none.
-    pub read_states: Vec<ChatReadState>,
+    /// Each room's state (read position, members). Empty for a source that has none.
+    pub room_states: Vec<ChatRoomState>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -147,7 +147,7 @@ impl SourceAdapter for MacosAdapter {
             messages: output.messages,
             cursors: output.cursors,
             incremental: output.incremental,
-            read_states: output.read_states,
+            room_states: output.room_states,
         })
     }
 
@@ -169,7 +169,7 @@ impl SourceAdapter for MacosAdapter {
             messages: output.messages,
             cursors: output.cursors,
             incremental: output.incremental,
-            read_states: output.read_states,
+            room_states: output.room_states,
         })
     }
 }

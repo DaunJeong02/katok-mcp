@@ -36,7 +36,7 @@ pub(crate) fn conflict_message(error: &clap::Error) -> Option<String> {
 }
 
 #[derive(Parser)]
-#[command(name = "katok", about = "katok: local KakaoTalk search CLI")]
+#[command(name = "katok", about = "katok: local KakaoTalk search CLI", version)]
 pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) data_dir: Option<PathBuf>,
@@ -105,6 +105,14 @@ pub(crate) enum Commands {
             conflicts_with_all = ["prune_preview", "prune_deleted"]
         )]
         chats: Vec<String>,
+        /// Store a room the archive does not hold yet only from this time on (unix
+        /// milliseconds, compared with the send time). Needs `--chat`.
+        ///
+        /// The time becomes that room's floor and applies to every later sync, so older rows
+        /// never arrive by any read path. A room already in the archive keeps what it has: to
+        /// change its range, `forget` it and sync it again with another `--since`.
+        #[arg(long, value_name = "UNIX_MS", requires = "chats", value_parser = clap::value_parser!(i64).range(0..))]
+        since: Option<i64>,
     },
     Index {
         /// Rebuild every vector instead of reusing unchanged vectors from the committed generation.
@@ -213,7 +221,9 @@ pub(crate) enum Commands {
     /// `chat_type` is `direct`, `group`, or `self` (the memo chat whose only member is you,
     /// named after your own nickname as KakaoTalk titles its window). `last_seen_log_id`,
     /// `new_message_count` and `my_watermark_log_id` are the read position KakaoTalk keeps for
-    /// the room, as of the last macOS sync; `null` when KakaoTalk has none.
+    /// the room, as of the last macOS sync; `null` when KakaoTalk has none. `member_count`
+    /// (owner included), `member_user_ids` (a preview, not the full list) and `is_open_chat`
+    /// come from the same sync.
     Rooms {
         #[arg(long)]
         json: bool,

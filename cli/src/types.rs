@@ -319,21 +319,36 @@ pub struct RoomOverview {
     pub message_count: usize,
     pub last_timestamp: Option<String>,
     pub last_message_id: Option<String>,
-    /// The room's read position as of the last macOS sync ([`ChatReadState`]). Log ids are
+    /// The room's read position as of the last macOS sync ([`ChatRoomState`]). Log ids are
     /// decimal strings: they exceed what a JSON number holds exactly in JavaScript.
     pub last_seen_log_id: Option<String>,
     pub new_message_count: Option<i64>,
     pub my_watermark_log_id: Option<String>,
+    /// [`ChatRoomState::member_count`], [`ChatRoomState::member_user_ids`] as decimal strings,
+    /// and [`ChatRoomState::is_open_chat`], as of the last macOS sync.
+    pub member_count: Option<i64>,
+    pub member_user_ids: Option<Vec<String>>,
+    pub is_open_chat: Option<bool>,
 }
 
-/// One room's read position as KakaoTalk keeps it in `NTChatRoom`: `lastSeenLogId`,
-/// `countOfNewMessage`, and the account owner's entry in the `watermarkKeys`/`watermarkValues`
-/// pair. Which of them tracks what the owner has read is not settled, so all three are kept.
-/// `None` when the column is missing or the value cannot be read.
+/// One room as KakaoTalk keeps it in `NTChatRoom`, beyond its name: the read position and the
+/// membership. Each field is `None` when this install lacks the column or the value cannot be
+/// read.
+///
+/// The read position is `lastSeenLogId`, `countOfNewMessage`, and the account owner's entry in
+/// the `watermarkKeys`/`watermarkValues` pair; which of them tracks what the owner has read is
+/// not settled, so all three are kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatReadState {
+pub struct ChatRoomState {
     pub chat_id: String,
     pub last_seen_log_id: Option<i64>,
     pub new_message_count: Option<i64>,
     pub my_watermark_log_id: Option<i64>,
+    /// `activeMembersCount`: everyone in the room, the account owner included.
+    pub member_count: Option<i64>,
+    /// `displayMemberIds`, the few members KakaoTalk previews for the room, without the owner;
+    /// a direct chat with no preview falls back to its peer. Not the full member list.
+    pub member_user_ids: Option<Vec<i64>>,
+    /// `linkId != 0`.
+    pub is_open_chat: Option<bool>,
 }

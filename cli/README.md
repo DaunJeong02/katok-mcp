@@ -256,6 +256,8 @@ sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가
 
 `katok sync --source macos --chat <chat_id> --json`은 지정한 방만 읽어 아카이브에 넣습니다. `--chat`은 여러 번 줄 수 있습니다. 다른 방의 행은 카카오톡 DB 쿼리 단계에서 걸러지므로 본문을 메모리로 읽지도 않고, 아카이브의 `chats`에도 들어가지 않습니다. macOS 소스의 chat_id는 숫자여야 하고, 빈 값은 거부합니다(빈 값을 버리면 모든 방을 읽는 sync가 되기 때문입니다). `--prune-preview`/`--prune-deleted`와 함께 쓸 수 없습니다.
 
+`katok sync --source macos --chat <chat_id> --since <unix_ms> --json`은 아카이브에 아직 없는 방을 그 시각 이후부터만 넣습니다. 시각은 보낸 시각(`sentAt`)과 밀리초 단위로 비교합니다. `--chat` 없이는 쓸 수 없습니다. "아직 없는 방"은 메시지 행도 바닥도 없는 방입니다. 그런 방에 `--since`가 그 방의 바닥(`chat_floors`)으로 저장되고, 이후 모든 sync가 증분·전체·무필터를 가리지 않고 바닥 이전 행을 버립니다. 그래서 커서는 평소처럼 테이블의 최신 행까지 전진하고, 커서 앞 재읽기 구간이나 교체된 행, 늦게 받은 옛 메시지로도 옛 행이 들어오지 않습니다. 이미 메시지나 바닥이 있는 방은 `--since`를 무시합니다. 범위를 바꾸려면(예: "지금부터" → "30일") 그 방을 `forget --yes`로 지운 뒤 새 `--since`로 다시 sync합니다. `forget`은 바닥도 지우므로 `--since` 없이 다시 넣으면 전체 기록이 들어옵니다.
+
 커서 설계: 증분 커서는 방과 무관하게 DB 테이블 전체의 가장 최근 행 8개입니다. 필터 sync가 이 커서를 무필터 커서 자리에 저장하면, 건너뛴 방의 새 행이 커서 앞에 남아 다음 무필터 `--incremental`이 그 행을 영영 읽지 않습니다. 그래서 필터 sync는 무필터 커서를 읽지도 쓰지도 않고, 방 집합(정렬·중복 제거한 chat_id의 해시)마다 별도 커서를 씁니다. 같은 집합으로 다시 실행하면 순서·중복과 무관하게 증분으로 읽고, 집합이 바뀌면(방 추가·제거) 첫 실행은 그 방들을 전체로 읽습니다. 새로 추가한 방의 과거 기록도 그때 들어옵니다. 집합마다 남는 커서는 DB 파일당 8행이라 지우지 않습니다. 단 `forget --yes`는 무필터·필터 커서를 전부 지웁니다. 커서는 어느 방을 지나갔는지 기록하지 않아서, 지운 방이 든 커서만 골라낼 수 없고 남겨 두면 그 방을 다시 sync할 때 커서 앞의 과거 기록이 빠지기 때문입니다. 대가는 다음 `--incremental` sync 한 번이 전체를 읽는 것입니다.
 
 요구사항:
@@ -312,11 +314,13 @@ katok send --chat <chat-id> --text "검토할 초안" --draft --accept-use-polic
 ## CLI 명령 요약
 
 ```bash
+katok --version
 katok doctor --json
 katok source chats --source macos --json
 katok sync --source macos --json
 katok sync --source macos --incremental --json
 katok sync --source macos --chat <chat-id> --incremental --json
+katok sync --source macos --chat <chat-id> --since <unix-ms> --json
 katok sync --json
 katok index --json
 katok search keyword "보고서" --json
@@ -337,7 +341,7 @@ katok send --chat <chat-id> --text "메시지" --accept-use-policy --json
 
 `katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
 
-`katok forget --chat <chat-id>`는 한 방을 아카이브에서 지웁니다. `--chat`은 여러 번 줄 수 있습니다. `--yes` 없이 실행하면 아무것도 지우지 않고 지울 행 수만 테이블별로 보여 줍니다. `--yes`를 주면 그 방의 `messages`·`chats`·`chunks`·`chunks_fts`·`chunk_messages`·`chunk_parent_refs`·`parent_chunks`·`parent_chunk_children`·`reply_edges` 행을 한 트랜잭션으로 지우고, 기본 위치(`<data-dir>/media/<chat-id>`, `<data-dir>/transcripts`)의 저장된 미디어와 transcript도 지웁니다. `--out`으로 다른 곳에 저장한 파일은 추적하지 않습니다. 다른 방에서 이 방 메시지에 단 답장은 행이 남고 부모만 `parent_not_in_archive`로 바뀝니다. semantic 벡터는 방 단위로 지울 수 없으므로, 인덱스가 있으면 semantic 디렉터리에 `REBUILD_REQUIRED` 표식을 남기고 `next_step`으로 `katok index --full --json`을 안내합니다. `doctor --json`의 `semantic_rebuild_required`가 이 표식을 보여 줍니다. 다음 `katok index`는 아카이브의 현재 창만으로 새 generation을 만들고 옛 generation을 지우므로, 시작 전에 있던 표식을 지웁니다(실행 도중에 생긴 표식은 남깁니다). 카카오톡 원본은 건드리지 않으므로, 그 방을 읽는 sync가 다시 돌면 과거 기록까지 전부 다시 들어옵니다(커서 초기화는 위 커서 설계 참고). 먼저 `sync --chat` 목록에서 빼세요.
+`katok forget --chat <chat-id>`는 한 방을 아카이브에서 지웁니다. `--chat`은 여러 번 줄 수 있습니다. `--yes` 없이 실행하면 아무것도 지우지 않고 지울 행 수만 테이블별로 보여 줍니다. `--yes`를 주면 그 방의 `messages`·`chats`·`chunks`·`chunks_fts`·`chunk_messages`·`chunk_parent_refs`·`parent_chunks`·`parent_chunk_children`·`reply_edges`·`chat_floors` 행을 한 트랜잭션으로 지우고, 기본 위치(`<data-dir>/media/<chat-id>`, `<data-dir>/transcripts`)의 저장된 미디어와 transcript도 지웁니다. `--out`으로 다른 곳에 저장한 파일은 추적하지 않습니다. 다른 방에서 이 방 메시지에 단 답장은 행이 남고 부모만 `parent_not_in_archive`로 바뀝니다. semantic 벡터는 방 단위로 지울 수 없으므로, 인덱스가 있으면 semantic 디렉터리에 `REBUILD_REQUIRED` 표식을 남기고 `next_step`으로 `katok index --full --json`을 안내합니다. `doctor --json`의 `semantic_rebuild_required`가 이 표식을 보여 줍니다. 다음 `katok index`는 아카이브의 현재 창만으로 새 generation을 만들고 옛 generation을 지우므로, 시작 전에 있던 표식을 지웁니다(실행 도중에 생긴 표식은 남깁니다). 카카오톡 원본은 건드리지 않으므로, 그 방을 읽는 sync가 다시 돌면 과거 기록까지 전부 다시 들어옵니다(커서 초기화는 위 커서 설계 참고). 먼저 `sync --chat` 목록에서 빼세요.
 
 권한 진단이 필요할 때만:
 
@@ -390,6 +394,12 @@ katok doctor --macos-probe --json
 - `my_watermark_log_id`: `watermarkKeys`/`watermarkValues` 쌍에서 내 user_id 자리의 값입니다.
 
 log id는 `mentioned_user_ids`와 같은 이유로 10진 문자열이고, `new_message_count`는 숫자입니다. 원본에 열이 없거나 값을 읽지 못하면 `null`입니다. 값은 macOS sync가 아카이브의 `chats`에 저장한 것이고 `rooms`는 원본을 직접 읽지 않습니다. sync는 증분이든 아니든 매번 모든 방(`--chat`이면 그 방들)의 읽음 위치를 다시 읽으므로, 새 메시지 없이 카카오톡에서 방을 읽기만 해도 다음 sync에 반영됩니다. 아카이브에 없는 방은 읽음 위치만으로 추가되지 않습니다.
+
+같은 `rooms --json`에는 방 구성 세 필드도 붙습니다. 읽음 위치와 같은 방식으로 매 macOS sync가 다시 읽어 저장하고, 원본에 열이 없거나 값을 읽지 못하면 `null`입니다.
+
+- `member_count`: `NTChatRoom.activeMembersCount`, 나를 포함한 방 인원입니다. `displayMemberIds`는 카카오톡이 미리보기로 보여 주는 몇 명뿐이라 인원수로 쓰지 않습니다.
+- `member_user_ids`: `displayMemberIds`의 user_id에서 나를 뺀 10진 문자열 배열입니다. 전체 멤버 목록이 아니라 미리보기 목록입니다. 미리보기가 없는 1:1 방은 `directChatMemberUserId`(상대)를 씁니다.
+- `is_open_chat`: `linkId`가 0이 아니면 `true`입니다.
 
 연결 상태는 `katok doctor --json`의 `kakao_app`과 `semantic_rebuild_required`, 권한 상태는 `katok doctor --macos-probe --json`의 `source_access`로 봅니다(위 설치 절). `source_access`를 기본 `doctor`에 넣지 않은 이유는 기본 `doctor`가 권한 프롬프트를 띄우지 않는다는 약속 때문입니다. 이 약속에 기대어 `doctor --json`을 자동으로 부르는 호출자(예: semantic search 전마다 doctor를 확인하는 MCP 서버)가 있습니다.
 

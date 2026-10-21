@@ -1,152 +1,14 @@
 //! Flags and subcommands an app embedding katok as a sidecar relies on, driven through the CLI
-//! against a synthetic KakaoTalk install: a SQLCipher database built at test time under a
-//! temporary HOME, and a katok auth cache that names its synthetic account. No real KakaoTalk,
-//! keychain, or system state is touched.
+//! against the synthetic KakaoTalk install in `common`.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 
-use katok::kakao::{auth, derive};
+use common::{install, Install, GROUP_A, GROUP_B, PEER, TEST_USER_ID};
+use katok::kakao::auth;
 use rusqlite::{params, Connection};
 use serde_json::Value;
-
-const TEST_UUID: &str = "00000000-1111-2222-3333-444444444444";
-const TEST_USER_ID: i64 = 1_000_000_001;
-const GROUP_A: i64 = 100;
-const GROUP_B: i64 = 200;
-const PEER: i64 = 500;
-
-struct Install {
-    _temp: tempfile::TempDir,
-    home: PathBuf,
-    data: PathBuf,
-    db_path: PathBuf,
-    key: String,
-}
-
-fn install() -> Install {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let home = temp.path().join("home");
-    let data = temp.path().join("data");
-    let container = auth::container_dir(&home);
-    std::fs::create_dir_all(&container).expect("container dir");
-    std::fs::create_dir_all(data.join("kakao")).expect("auth cache dir");
-    std::fs::write(
-        data.join("kakao").join("auth.json"),
-        serde_json::json!({ "user_id": TEST_USER_ID, "uuid": TEST_UUID }).to_string(),
-    )
-    .expect("auth cache");
-    let db_path = container.join(derive::database_name(TEST_USER_ID, TEST_UUID));
-    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
-    let conn = open_source(&db_path, &key);
-    conn.execute_batch(
-        "CREATE TABLE NTChatRoom (
-            chatId INTEGER NOT NULL DEFAULT 0, linkId INTEGER NOT NULL DEFAULT 0,
-            type INTEGER NOT NULL DEFAULT 0, chatName TEXT,
-            activeMembersCount INTEGER NOT NULL DEFAULT 0,
-            directChatMemberUserId INTEGER NOT NULL DEFAULT 0, displayMemberIds BLOB,
-            PRIMARY KEY (chatId, linkId));
-         CREATE TABLE NTUser (
-            userId INTEGER NOT NULL DEFAULT 0, linkId INTEGER NOT NULL DEFAULT 0,
-            friendNickName TEXT, nickName TEXT, displayName TEXT,
-            PRIMARY KEY (userId, linkId));
-         CREATE TABLE NTChatMessage (
-            chatId INTEGER NOT NULL DEFAULT 0, logId INTEGER NOT NULL DEFAULT 0,
-            msgId INTEGER NOT NULL DEFAULT 0, authorId INTEGER NOT NULL DEFAULT 0,
-            type INTEGER NOT NULL DEFAULT -1, supplement TEXT, attachment TEXT, message TEXT,
-            sentAt INTEGER DEFAULT 0,
-            PRIMARY KEY (chatId, logId, msgId));
-         INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount)
-             VALUES (100, 0, 1, 'Synthetic Group A', 3), (200, 0, 1, 'Synthetic Group B', 3);
-         INSERT INTO NTUser(userId, linkId, friendNickName) VALUES (500, 0, 'Alpha');",
-    )
-    .expect("schema");
-    let install = Install {
-        _temp: temp,
-        home,
-        data,
-        db_path,
-        key,
-    };
-    for log in 1..=3 {
-        install.insert(GROUP_A, log, PEER, None);
-        install.insert(GROUP_B, 1_000 + log, PEER, None);
-    }
-    install
-}
-
-fn open_source(path: &Path, key: &str) -> Connection {
-    let conn = Connection::open(path).expect("open source db");
-    conn.execute_batch(&format!(
-        "PRAGMA key = '{key}'; PRAGMA cipher_compatibility = 3;"
-    ))
-    .expect("source key");
-    conn
-}
-
-impl Install {
-    fn source(&self) -> Connection {
-        open_source(&self.db_path, &self.key)
-    }
-
-    fn insert(&self, chat: i64, log: i64, author: i64, attachment: Option<&str>) {
-        self.source()
-            .execute(
-                "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, attachment,
-                                           message, sentAt)
-                 VALUES (?1, ?2, ?2, ?3, 1, ?4, ?5, ?6)",
-                params![
-                    chat,
-                    log,
-                    author,
-                    attachment,
-                    format!("synthetic message {log}"),
-                    1_700_000_000 + log
-                ],
-            )
-            .expect("insert message");
-    }
-
-    fn command(&self, args: &[&str]) -> assert_cmd::Command {
-        let mut command = assert_cmd::Command::cargo_bin("katok").expect("katok binary");
-        command
-            .env("HOME", &self.home)
-            .env_remove("KATOK_ARCHIVE_KEY")
-            .env_remove("KATOK_KAKAO_USER_ID")
-            .arg("--data-dir")
-            .arg(&self.data)
-            .args(args);
-        command
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.command(args).assert().success().get_output().clone();
-        serde_json::from_slice(&out.stdout).expect("json stdout")
-    }
-
-    fn archive(&self) -> Connection {
-        Connection::open(self.data.join("archive.sqlite3")).expect("open archive")
-    }
-
-    fn archived(&self, chat: i64) -> i64 {
-        self.archive()
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE chat_id = ?1",
-                [chat.to_string()],
-                |row| row.get(0),
-            )
-            .expect("count archived")
-    }
-
-    fn has_message(&self, chat: i64, log: i64) -> bool {
-        self.archive()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE message_id = ?1)",
-                [format!("{chat}-{log}")],
-                |row| row.get(0),
-            )
-            .expect("look up message")
-    }
-}
 
 #[test]
 fn a_filtered_sync_archives_only_the_named_chats() {
@@ -943,4 +805,223 @@ fn a_forgotten_room_comes_back_whole_on_the_next_unfiltered_sync() {
     let report = install.json(&plain);
     assert_eq!(report["incremental"], Value::Bool(false));
     assert_eq!(install.archived(GROUP_B), 3);
+}
+
+/// Between room B's second and third synthetic row: `--since` keeps rows 1002 and 1003.
+const SINCE_MS: &str = "1700001002000";
+
+impl Install {
+    fn b_logs(&self) -> Vec<i64> {
+        let conn = self.archive();
+        let mut stmt = conn
+            .prepare("SELECT message_id FROM messages WHERE chat_id = '200'")
+            .unwrap();
+        let mut logs: Vec<i64> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|id| id.unwrap()[4..].parse().unwrap())
+            .collect();
+        logs.sort_unstable();
+        logs
+    }
+}
+
+#[test]
+fn since_trims_a_new_room_and_every_later_read_of_it() {
+    let install = install();
+    let both = |extra: &[&str]| {
+        let mut args = vec![
+            "sync", "--source", "macos", "--chat", "100", "--chat", "200", "--json",
+        ];
+        args.extend_from_slice(extra);
+        install.json(&args)
+    };
+    install.json(&["sync", "--source", "macos", "--chat", "100", "--json"]);
+    both(&["--since", SINCE_MS, "--incremental"]);
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "the new room starts at --since"
+    );
+    assert_eq!(
+        install.archived(GROUP_A),
+        3,
+        "a room already archived ignores --since"
+    );
+
+    // Sent before the floor, written to the database only now: past the cursor, and the
+    // older rows sit inside the reader's re-read margin.
+    install.insert(GROUP_B, 500, PEER, None);
+    install.insert(GROUP_A, 501, PEER, None);
+    let next = both(&["--incremental"]);
+    assert_eq!(next["incremental"], Value::Bool(true));
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "no older row comes back incrementally"
+    );
+    assert!(
+        install.has_message(GROUP_A, 501),
+        "a room without a floor takes it"
+    );
+
+    both(&[]);
+    install.json(&["sync", "--source", "macos", "--json"]);
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "nor in a full or unfiltered read"
+    );
+
+    both(&["--since", "0"]);
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "a later --since does not widen it"
+    );
+
+    install.json(&["forget", "--chat", "200", "--yes", "--json"]);
+    both(&["--incremental"]);
+    assert_eq!(
+        install.b_logs(),
+        [500, 1001, 1002, 1003],
+        "forgotten and synced again without --since, the room comes back whole"
+    );
+}
+
+#[test]
+fn a_new_room_with_nothing_after_since_stays_trimmed() {
+    let install = install();
+    let b = |extra: &[&str]| {
+        let mut args = vec!["sync", "--source", "macos", "--chat", "200", "--json"];
+        args.extend_from_slice(extra);
+        install.json(&args)
+    };
+    b(&["--since", "1800000000000"]);
+    assert_eq!(install.archived(GROUP_B), 0);
+    b(&[]);
+    assert_eq!(
+        install.archived(GROUP_B),
+        0,
+        "the floor holds without a message"
+    );
+    b(&["--since", "0"]);
+    assert_eq!(
+        install.archived(GROUP_B),
+        0,
+        "a room with a floor is in the archive: a later --since leaves the floor alone"
+    );
+    install.insert(GROUP_B, 2_000, PEER, None);
+    install
+        .source()
+        .execute(
+            "UPDATE NTChatMessage SET sentAt = 1800000000 WHERE logId = 2000",
+            [],
+        )
+        .unwrap();
+    b(&["--incremental"]);
+    assert_eq!(install.b_logs(), [2000]);
+}
+
+#[test]
+fn since_is_refused_without_a_chat_or_below_zero() {
+    let install = install();
+    for args in [
+        &["sync", "--source", "macos", "--since", SINCE_MS][..],
+        &[
+            "sync", "--source", "macos", "--chat", "200", "--since", "-1",
+        ],
+        &[
+            "sync", "--source", "macos", "--chat", "200", "--since", "soon",
+        ],
+    ] {
+        install.command(args).assert().failure();
+    }
+}
+
+#[test]
+fn rooms_report_members_and_whether_a_room_is_an_open_chat() {
+    let install = install();
+    let source = install.source();
+    source
+        .execute(
+            "UPDATE NTChatRoom SET displayMemberIds = ?1 WHERE chatId = 100",
+            [bplist_ints(&[PEER, TEST_USER_ID, BIG_LOG_ID])],
+        )
+        .unwrap();
+    source
+        .execute_batch(
+            "UPDATE NTChatRoom SET linkId = 77, activeMembersCount = 40 WHERE chatId = 200;
+             INSERT INTO NTChatRoom(chatId, linkId, type, activeMembersCount,
+                                    directChatMemberUserId)
+                 VALUES (300, 0, 0, 2, 500), (400, 0, 5, 1, 0);",
+        )
+        .unwrap();
+    source
+        .execute(
+            "UPDATE NTChatRoom SET displayMemberIds = ?1 WHERE chatId = 400",
+            [bplist_ints(&[TEST_USER_ID])],
+        )
+        .unwrap();
+    drop(source);
+    install.insert(300, 1, PEER, None);
+    install.insert(400, 1, TEST_USER_ID, None);
+    install.json(&["sync", "--source", "macos", "--json"]);
+
+    let a = install.room(GROUP_A);
+    assert_eq!(a["member_count"], 3);
+    assert_eq!(
+        a["member_user_ids"],
+        serde_json::json!([PEER.to_string(), BIG_LOG_ID.to_string()]),
+        "the previewed members without the owner, every digit kept"
+    );
+    assert_eq!(a["is_open_chat"], false);
+    let b = install.room(GROUP_B);
+    assert_eq!(b["member_count"], 40);
+    assert_eq!(b["member_user_ids"], serde_json::json!([]));
+    assert_eq!(b["is_open_chat"], true);
+    let direct = install.room(300);
+    assert_eq!(direct["member_count"], 2);
+    assert_eq!(
+        direct["member_user_ids"],
+        serde_json::json!([PEER.to_string()]),
+        "a direct chat without a preview names its peer"
+    );
+    let own = install.room(400);
+    assert_eq!(own["chat_type"], "self");
+    assert_eq!(own["member_count"], 1);
+    assert_eq!(
+        own["member_user_ids"],
+        serde_json::json!([]),
+        "the self chat lists no one: its only member is the owner"
+    );
+
+    // Someone joins without a message: the next incremental sync still picks it up.
+    install
+        .source()
+        .execute(
+            "UPDATE NTChatRoom SET activeMembersCount = 4 WHERE chatId = 100",
+            [],
+        )
+        .unwrap();
+    install.json(&["sync", "--source", "macos", "--incremental", "--json"]);
+    assert_eq!(install.room(GROUP_A)["member_count"], 4);
+}
+
+#[test]
+fn version_prints_the_crate_version_and_exits_zero() {
+    for flag in ["--version", "-V"] {
+        let out = assert_cmd::Command::cargo_bin("katok")
+            .expect("katok binary")
+            .arg(flag)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("katok {}\n", env!("CARGO_PKG_VERSION")),
+            "{flag}"
+        );
+    }
 }

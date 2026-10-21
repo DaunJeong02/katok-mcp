@@ -131,7 +131,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_reply_edges_parent
             ON reply_edges(parent_message_id);
         CREATE INDEX IF NOT EXISTS idx_chunk_messages_message
-            ON chunk_messages(message_id);",
+            ON chunk_messages(message_id);
+        -- The earliest send time a room is stored from, set by the first `sync --since` that
+        -- adds it. Its own table because a room can hold no message yet: every message so far
+        -- may sit before the floor.
+        CREATE TABLE IF NOT EXISTS chat_floors (
+            chat_id TEXT PRIMARY KEY,
+            since_ms INTEGER NOT NULL
+        );",
     )
     .map_err(Error::Sql)?;
 
@@ -160,6 +167,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     ] {
         add_column_if_missing(conn, "chats", column, "INTEGER")?;
     }
+    add_column_if_missing(conn, "chats", "member_count", "INTEGER")?;
+    add_column_if_missing(conn, "chats", "member_user_ids", "TEXT")?;
+    add_column_if_missing(conn, "chats", "is_open_chat", "INTEGER")?;
     Ok(())
 }
 

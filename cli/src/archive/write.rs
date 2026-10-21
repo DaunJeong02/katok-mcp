@@ -1,7 +1,7 @@
 use super::model::DeletedMessage;
 use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
-    types::{ChatReadState, RawMessage, SourceCursor, SyncReport, TouchedChat},
+    types::{ChatRoomState, RawMessage, SourceCursor, SyncReport, TouchedChat},
     Error, Result,
 };
 use chrono::{DateTime, Utc};
@@ -240,30 +240,79 @@ impl Archive {
         })
     }
 
-    /// Store each room's read position on its `chats` row. A room the archive has no row for
-    /// is skipped, so a read position never adds a room to the archive.
-    pub fn record_read_states(&self, states: &[ChatReadState]) -> Result<()> {
+    /// Store each room's [`ChatRoomState`] on its `chats` row. A room the archive has no row
+    /// for is skipped, so a room's state never adds it to the archive.
+    pub fn record_room_states(&self, states: &[ChatRoomState]) -> Result<()> {
         let mut stmt = self
             .conn
             .prepare_cached(
                 "UPDATE chats
-                 SET last_seen_log_id = ?2, new_message_count = ?3, my_watermark_log_id = ?4
+                 SET last_seen_log_id = ?2, new_message_count = ?3, my_watermark_log_id = ?4,
+                     member_count = ?5, member_user_ids = ?6, is_open_chat = ?7
                  WHERE chat_id = ?1
                    AND (last_seen_log_id IS NOT ?2
                         OR new_message_count IS NOT ?3
-                        OR my_watermark_log_id IS NOT ?4)",
+                        OR my_watermark_log_id IS NOT ?4
+                        OR member_count IS NOT ?5
+                        OR member_user_ids IS NOT ?6
+                        OR is_open_chat IS NOT ?7)",
             )
             .map_err(Error::Sql)?;
         for state in states {
+            let members = state.member_user_ids.as_ref().map(|ids| {
+                let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
+                serde_json::Value::from(ids).to_string()
+            });
             stmt.execute(params![
                 state.chat_id,
                 state.last_seen_log_id,
                 state.new_message_count,
-                state.my_watermark_log_id
+                state.my_watermark_log_id,
+                state.member_count,
+                members,
+                state.is_open_chat
             ])
             .map_err(Error::Sql)?;
         }
         Ok(())
+    }
+
+    /// Give each of `chat_ids` the floor `since_ms` if the archive holds nothing of it yet: no
+    /// message and no floor. A room already in the archive keeps what it has, so a later
+    /// `--since` neither trims nor widens it. Returns the chats that got the floor.
+    pub fn register_chat_floors(&self, chat_ids: &[String], since_ms: i64) -> Result<Vec<String>> {
+        let mut registered = Vec::new();
+        for chat_id in chat_ids {
+            let inserted = self
+                .conn
+                .prepare_cached(
+                    "INSERT INTO chat_floors(chat_id, since_ms)
+                     SELECT ?1, ?2
+                     WHERE NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM chat_floors WHERE chat_id = ?1)",
+                )
+                .map_err(Error::Sql)?
+                .execute(params![chat_id, since_ms])
+                .map_err(Error::Sql)?;
+            if inserted == 1 {
+                registered.push(chat_id.clone());
+            }
+        }
+        Ok(registered)
+    }
+
+    /// Every room's floor, as unix milliseconds. Sync drops a message sent before its room's
+    /// floor whichever way it was read: in full, past a cursor, or as a replaced row.
+    pub fn chat_floors(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT chat_id, since_ms FROM chat_floors")
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(Error::Sql)?;
+        rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+            .map_err(Error::Sql)
     }
 
     /// Drop the chunk artifacts of `chat_id` whose start is at or after `from_started_at`.

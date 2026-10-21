@@ -81,6 +81,7 @@ impl Archive {
         }
         execute("DELETE FROM messages WHERE chat_id = ?1")?;
         execute("DELETE FROM chats WHERE chat_id = ?1")?;
+        execute("DELETE FROM chat_floors WHERE chat_id = ?1")?;
         self.clear_source_cursors()?;
         Ok(footprint)
     }

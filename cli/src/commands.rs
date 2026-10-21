@@ -11,7 +11,7 @@ use katok::{
     search::{bm25_search_scoped, keyword_search_scoped},
     semantic::semantic_search_live_with_config,
     transcript::export_transcript,
-    types::SyncTimings,
+    types::{RawMessage, SyncTimings},
 };
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -85,6 +85,7 @@ pub(crate) fn run(
             prune_deleted,
             incremental,
             chats,
+            since,
         } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
             run_sync(
@@ -97,6 +98,7 @@ pub(crate) fn run(
                     prune_deleted,
                     incremental,
                     chats,
+                    since,
                 },
                 &config,
                 &archive_path,
@@ -464,6 +466,8 @@ struct SyncOptions {
     incremental: bool,
     /// `--chat`: read and archive only these chats. Empty means every chat.
     chats: Vec<String>,
+    /// `--since`: the floor, in unix milliseconds, for a chat the archive does not hold yet.
+    since: Option<i64>,
 }
 
 /// The `sync_cursors` namespace a sync reads and writes its source cursors under.
@@ -514,6 +518,7 @@ fn run_sync(
         prune_deleted,
         incremental,
         chats,
+        since,
     } = options;
     let chats = chat_filter(&chats)?;
     let adapter = adapter_for_source(source, path, data_dir)?;
@@ -540,10 +545,24 @@ fn run_sync(
     // cursors go in the same unit, so a failed sync reads the same range again next time.
     let report = archive.in_transaction(|| {
         let upsert_started = Instant::now();
+        if let Some(since) = since {
+            archive
+                .register_chat_floors(&chats, since)
+                .context("record chat floors")?;
+        }
+        let floors = archive.chat_floors().context("read chat floors")?;
+        let messages: Vec<RawMessage> = messages
+            .into_iter()
+            .filter(|message| {
+                floors
+                    .get(&message.chat_id)
+                    .is_none_or(|floor| message.timestamp.timestamp_millis() >= *floor)
+            })
+            .collect();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
         archive
-            .record_read_states(&read.read_states)
-            .context("record read states")?;
+            .record_room_states(&read.room_states)
+            .context("record room states")?;
         archive
             .record_source_cursors(&cursor_source, &read.cursors)
             .context("record source cursors")?;

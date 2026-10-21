@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::auth::DatabaseKey;
 use super::bplist;
-use crate::types::{ChatReadState, RawMessage, SourceCursor};
+use crate::types::{ChatRoomState, RawMessage, SourceCursor};
 use crate::{Error, Result};
 
 /// Output of reading one or more KakaoTalk databases.
@@ -24,9 +24,9 @@ pub struct ReaderOutput {
     pub cursors: Vec<SourceCursor>,
     /// Every database was read from a cursor, not in full.
     pub incremental: bool,
-    /// Each room's read position, read in full on every read, incremental or not: reading a
-    /// room in KakaoTalk moves it without adding a message.
-    pub read_states: Vec<ChatReadState>,
+    /// Each room's state, read in full on every read, incremental or not: reading a room in
+    /// KakaoTalk, or someone joining it, changes it without adding a message.
+    pub room_states: Vec<ChatRoomState>,
 }
 
 /// More members than any KakaoTalk room holds; a watermark array past it is corrupt.
@@ -271,14 +271,14 @@ fn enrich_display_members(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>)
     }
 }
 
-/// Best-effort read of every room's [`ChatReadState`], limited to `only_chats` when given. A
+/// Best-effort read of every room's [`ChatRoomState`], limited to `only_chats` when given. A
 /// column this install lacks reads as NULL rather than failing the query, and any read error
-/// leaves the rooms without a read position; it never aborts the read.
-fn load_read_states(
+/// leaves the rooms without a state; it never aborts the read.
+fn load_room_states(
     conn: &Connection,
     user_id: i64,
     only_chats: Option<&[i64]>,
-) -> Vec<ChatReadState> {
+) -> Vec<ChatRoomState> {
     let Ok(mut columns) = conn.prepare("SELECT name FROM pragma_table_info('NTChatRoom')") else {
         return Vec::new();
     };
@@ -294,35 +294,66 @@ fn load_read_states(
         }
     };
     let sql = format!(
-        "SELECT chatId, {}, {}, {}, {} FROM NTChatRoom",
+        "SELECT chatId, {}, {}, {}, {}, {}, {}, {}, {} FROM NTChatRoom",
         column("lastSeenLogId"),
         column("countOfNewMessage"),
         column("watermarkKeys"),
         column("watermarkValues"),
+        column("activeMembersCount"),
+        column("displayMemberIds"),
+        column("directChatMemberUserId"),
+        column("linkId"),
     );
     let Ok(mut stmt) = conn.prepare(&sql) else {
         return Vec::new();
     };
     let Ok(rows) = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, Option<i64>>(1).ok().flatten(),
-            row.get::<_, Option<i64>>(2).ok().flatten(),
-            row.get::<_, Option<Vec<u8>>>(3).ok().flatten(),
-            row.get::<_, Option<Vec<u8>>>(4).ok().flatten(),
-        ))
+        let int = |idx| row.get::<_, Option<i64>>(idx).ok().flatten();
+        let blob = |idx| row.get::<_, Option<Vec<u8>>>(idx).ok().flatten();
+        let watermark = watermark_of(user_id, blob(3).as_deref(), blob(4).as_deref());
+        Ok(ChatRoomState {
+            chat_id: row.get::<_, i64>(0)?.to_string(),
+            last_seen_log_id: int(1),
+            new_message_count: int(2),
+            my_watermark_log_id: watermark,
+            member_count: int(5),
+            member_user_ids: previewed_members(user_id, blob(6).as_deref(), int(7)),
+            is_open_chat: int(8).map(|link| link != 0),
+        })
     }) else {
         return Vec::new();
     };
     rows.flatten()
-        .filter(|(chat_id, ..)| only_chats.is_none_or(|ids| ids.contains(chat_id)))
-        .map(|(chat_id, last_seen, unread, keys, values)| ChatReadState {
-            chat_id: chat_id.to_string(),
-            last_seen_log_id: last_seen,
-            new_message_count: unread,
-            my_watermark_log_id: watermark_of(user_id, keys.as_deref(), values.as_deref()),
+        .filter(|state| {
+            only_chats.is_none_or(|ids| {
+                state
+                    .chat_id
+                    .parse::<i64>()
+                    .is_ok_and(|id| ids.contains(&id))
+            })
         })
         .collect()
+}
+
+/// The members KakaoTalk previews for a room, without `user_id`: `displayMemberIds`, or the
+/// peer of a direct chat that has no preview. `None` when neither can be read.
+fn previewed_members(
+    user_id: i64,
+    display: Option<&[u8]>,
+    direct: Option<i64>,
+) -> Option<Vec<i64>> {
+    let mut members: Option<Vec<i64>> = display
+        .and_then(bplist::int_array)
+        .map(|ids| ids.into_iter().filter(|id| *id != user_id).collect());
+    let peer = direct.filter(|id| *id != 0 && *id != user_id);
+    if members.as_ref().is_none_or(Vec::is_empty) {
+        if let Some(peer) = peer {
+            members = Some(vec![peer]);
+        } else if direct.is_some() {
+            members.get_or_insert_with(Vec::new);
+        }
+    }
+    members
 }
 
 /// `user_id`'s value in a room's watermark: the entry of `values` at the position `user_id`
@@ -798,7 +829,7 @@ pub fn read_databases_for_chats(
 
     let mut chats: HashMap<String, ChatRecord> = HashMap::new();
     let mut messages_by_id: HashMap<String, RawMessage> = HashMap::new();
-    let mut read_states: HashMap<String, ChatReadState> = HashMap::new();
+    let mut room_states: HashMap<String, ChatRoomState> = HashMap::new();
     let mut stopped: Vec<SourceCursor> = Vec::new();
     let mut incremental = !openable.is_empty() && !skipped;
 
@@ -821,7 +852,7 @@ pub fn read_databases_for_chats(
         // store) must not abort messages already gathered from a healthy DB:
         // log a one-line warning (filename only) and skip this DB.
         let read = read_one(conn, user_id, &account, &users, after, only_chats);
-        let db_read_states = load_read_states(conn, user_id, only_chats);
+        let db_room_states = load_room_states(conn, user_id, only_chats);
         drop(snapshot);
         let (db_chats, db_messages) = match read {
             Ok(result) => result,
@@ -835,8 +866,8 @@ pub fn read_databases_for_chats(
         for (chat_id, record) in db_chats {
             chats.entry(chat_id).or_insert(record);
         }
-        for state in db_read_states {
-            read_states.entry(state.chat_id.clone()).or_insert(state);
+        for state in db_room_states {
+            room_states.entry(state.chat_id.clone()).or_insert(state);
         }
         for message in db_messages {
             messages_by_id
@@ -855,15 +886,15 @@ pub fn read_databases_for_chats(
 
     let mut chat_list: Vec<ChatRecord> = chats.into_values().collect();
     chat_list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-    let mut read_states: Vec<ChatReadState> = read_states.into_values().collect();
-    read_states.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+    let mut room_states: Vec<ChatRoomState> = room_states.into_values().collect();
+    room_states.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
 
     Ok(ReaderOutput {
         chats: chat_list,
         messages,
         cursors: stopped,
         incremental,
-        read_states,
+        room_states,
     })
 }
 

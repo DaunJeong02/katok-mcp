@@ -6,6 +6,8 @@
 //! by hand. A key the output adds also fails until the golden is regenerated with
 //! `UPDATE_GOLDEN=1 cargo test --test json_contract`, so every addition is reviewed.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -208,6 +210,22 @@ fn the_error_envelope_keys_match_the_golden() {
         .clone();
     let envelope: Value = serde_json::from_slice(&out.stdout).expect("json error envelope");
     check_golden("error", "<any command> --json, on failure", &envelope);
+}
+
+#[test]
+fn source_chats_json_keys_match_the_golden() {
+    let install = common::install();
+    let output = install.json(&["source", "chats", "--source", "macos", "--json"]);
+    assert_eq!(
+        output.as_array().map(Vec::len),
+        Some(2),
+        "the synthetic install's two rooms"
+    );
+    check_golden(
+        "source-chats",
+        "source chats --source macos --json",
+        &output,
+    );
 }
 
 #[test]

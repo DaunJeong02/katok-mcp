@@ -390,7 +390,8 @@ impl Archive {
                            ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1),
                         (SELECT m.message_id FROM messages m WHERE m.chat_id = c.chat_id
                            ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1),
-                        c.last_seen_log_id, c.new_message_count, c.my_watermark_log_id
+                        c.last_seen_log_id, c.new_message_count, c.my_watermark_log_id,
+                        c.member_count, c.member_user_ids, c.is_open_chat
                  FROM chats c
                  ORDER BY 5 DESC NULLS LAST, c.chat_name",
             )
@@ -407,6 +408,11 @@ impl Archive {
                     last_seen_log_id: row.get::<_, Option<i64>>(6)?.map(|id| id.to_string()),
                     new_message_count: row.get(7)?,
                     my_watermark_log_id: row.get::<_, Option<i64>>(8)?.map(|id| id.to_string()),
+                    member_count: row.get(9)?,
+                    member_user_ids: row
+                        .get::<_, Option<String>>(10)?
+                        .and_then(|raw| serde_json::from_str(&raw).ok()),
+                    is_open_chat: row.get(11)?,
                 })
             })
             .map_err(Error::Sql)?
