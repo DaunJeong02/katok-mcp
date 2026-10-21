@@ -374,6 +374,12 @@ fn run_doctor(
     semantic_dir: PathBuf,
 ) -> Result<()> {
     let macos_probe = macos_probe_payload(macos_probe_enabled, &data_dir);
+    let source_access = source_access_payload(macos_probe_enabled);
+    let kakao_app = match katok::kakao::process_running("KakaoTalk") {
+        Some(true) => "running",
+        Some(false) => "not_running",
+        None => "unknown",
+    };
     let payload = serde_json::json!({
         "name": "katok",
         "command": "katok",
@@ -393,6 +399,8 @@ fn run_doctor(
         "archive": {
             "status": if archive_path.exists() { "present" } else { "missing" }
         },
+        "source_access": source_access,
+        "kakao_app": { "status": kakao_app },
         "embedder": {
             "model": config.embedder_model,
             "dimension": config.vector_dimension,
@@ -402,6 +410,25 @@ fn run_doctor(
         }
     });
     print_payload(json, &payload)
+}
+
+/// Opening the container is what raises the macOS prompt, so like the rest of the probe it
+/// runs only under `--macos-probe`; a plain `doctor` must stay prompt-free.
+fn source_access_payload(enabled: bool) -> serde_json::Value {
+    let not_checked = katok::kakao::SourceAccess {
+        status: "not_checked",
+        failed_at: None,
+        errno: None,
+    };
+    let access = match (enabled, dirs::home_dir()) {
+        (false, _) => not_checked,
+        (true, Some(home)) => katok::kakao::probe_source_access(&home),
+        (true, None) => katok::kakao::SourceAccess {
+            status: "error",
+            ..not_checked
+        },
+    };
+    serde_json::to_value(access).unwrap_or_default()
 }
 
 fn macos_probe_payload(enabled: bool, data_dir: &Path) -> serde_json::Value {

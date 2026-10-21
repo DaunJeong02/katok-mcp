@@ -90,7 +90,7 @@ katok permissions macos
 katok doctor --json
 ```
 
-`doctor`는 기본값으로 로컬 인덱스 freshness만 확인하므로 macOS 권한 prompt를 띄우지 않습니다.
+`doctor`는 기본값으로 로컬 인덱스 freshness와 프롬프트가 필요 없는 상태만 확인하므로 macOS 권한 prompt를 띄우지 않습니다.
 또한 `freshness` 섹션에서 마지막 `sync`와 `index` 완료 시각을 보여줍니다.
 카카오톡 앱, 컨테이너, DB 파일 개수, 인증 캐시 여부까지 확인하려면 아래처럼 명시적으로 실행합니다.
 
@@ -98,7 +98,9 @@ katok doctor --json
 katok doctor --macos-probe --json
 ```
 
-이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 `katok permissions macos`로 System Settings를 연 뒤 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 Full Disk Access에 허용하세요.
+이 probe는 `source_access`도 채웁니다. 컨테이너에 실제로 `opendir`하고 DB 파일 하나를 `open(O_RDONLY)`해 본 결과입니다. `status`는 `ok`, `denied`(EPERM·EACCES), `missing`(컨테이너나 DB 파일 없음), `error`(그 밖의 실패) 중 하나이고, `failed_at`(`opendir`·`open`)과 `errno`가 실패한 단계를 알려 줍니다. 권한 상태를 프롬프트 없이 물어볼 공개 API가 없어서 실제로 열어 보는 방식이고, 그래서 기본 `doctor`에서는 실행하지 않고 `"status": "not_checked"`로 둡니다. 카카오톡 앱이 떠 있는지(`kakao_app.status`: `running`·`not_running`, `pgrep -x KakaoTalk`)와 `forget`이 남긴 semantic 재빌드 표식(`semantic_rebuild_required`)은 프롬프트를 띄우지 않으므로 기본 `doctor`에도 나옵니다.
+
+이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 요청이 떠 있는 동안 첫 `opendir`이 응답을 기다리며 멈춥니다. 반복 요청을 줄이려면 `katok permissions macos`로 System Settings를 연 뒤 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 Full Disk Access에 허용하세요.
 
 `katok send`는 별도의 Accessibility 권한이 필요합니다.
 
@@ -388,6 +390,8 @@ katok doctor --macos-probe --json
 - `my_watermark_log_id`: `watermarkKeys`/`watermarkValues` 쌍에서 내 user_id 자리의 값입니다.
 
 log id는 `mentioned_user_ids`와 같은 이유로 10진 문자열이고, `new_message_count`는 숫자입니다. 원본에 열이 없거나 값을 읽지 못하면 `null`입니다. 값은 macOS sync가 아카이브의 `chats`에 저장한 것이고 `rooms`는 원본을 직접 읽지 않습니다. sync는 증분이든 아니든 매번 모든 방(`--chat`이면 그 방들)의 읽음 위치를 다시 읽으므로, 새 메시지 없이 카카오톡에서 방을 읽기만 해도 다음 sync에 반영됩니다. 아카이브에 없는 방은 읽음 위치만으로 추가되지 않습니다.
+
+연결 상태는 `katok doctor --json`의 `kakao_app`과 `semantic_rebuild_required`, 권한 상태는 `katok doctor --macos-probe --json`의 `source_access`로 봅니다(위 설치 절). `source_access`를 기본 `doctor`에 넣지 않은 이유는 기본 `doctor`가 권한 프롬프트를 띄우지 않는다는 약속 때문입니다. 이 약속에 기대어 `doctor --json`을 자동으로 부르는 호출자(예: semantic search 전마다 doctor를 확인하는 MCP 서버)가 있습니다.
 
 ## 개인정보와 로컬 파일
 

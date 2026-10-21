@@ -77,6 +77,78 @@ pub fn probe_status(home: &Path, data_dir: &Path) -> ProbeStatus {
     }
 }
 
+/// Whether this process may read the KakaoTalk container, found by trying: macOS offers no
+/// public way to ask without risking the "access data from other apps" prompt, so the answer
+/// is the errno of a real `opendir` on the container and `open(O_RDONLY)` of one database file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceAccess {
+    /// `ok`, `denied` (EPERM/EACCES), `missing` (no container or no database file), or `error`
+    /// for any other failure.
+    pub status: &'static str,
+    /// The step that failed: `opendir` or `open`.
+    pub failed_at: Option<&'static str>,
+    pub errno: Option<i32>,
+}
+
+/// Try to read the container under `home` and report the outcome. This is the step that can
+/// raise the macOS prompt, and it blocks until the prompt is answered; call it only when asked.
+/// Never prints the database file name.
+pub fn probe_source_access(home: &Path) -> SourceAccess {
+    let failure = |step: &'static str, error: std::io::Error| {
+        let errno = error.raw_os_error();
+        let status = match errno {
+            Some(libc::ENOENT | libc::ENOTDIR) => "missing",
+            Some(libc::EPERM | libc::EACCES) => "denied",
+            _ => "error",
+        };
+        SourceAccess {
+            status,
+            failed_at: Some(step),
+            errno,
+        }
+    };
+    let entries = match std::fs::read_dir(container_dir(home)) {
+        Ok(entries) => entries,
+        Err(error) => return failure("opendir", error),
+    };
+    let database = entries.flatten().find(|entry| {
+        entry.file_type().is_ok_and(|kind| kind.is_file())
+            && entry.file_name().to_str().is_some_and(is_hex_db_name)
+    });
+    let Some(database) = database else {
+        return SourceAccess {
+            status: "missing",
+            failed_at: Some("open"),
+            errno: None,
+        };
+    };
+    match std::fs::File::open(database.path()) {
+        Ok(_) => SourceAccess {
+            status: "ok",
+            failed_at: None,
+            errno: None,
+        },
+        Err(error) => failure("open", error),
+    }
+}
+
+/// Whether a process named exactly `name` is running, as `/usr/bin/pgrep -x` sees it. `None`
+/// when pgrep cannot run or reports an error.
+pub fn process_running(name: &str) -> Option<bool> {
+    let status = Command::new("/usr/bin/pgrep")
+        .arg("-x")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// A verified `(user_id, uuid)` plus the discovered openable database files.
 #[derive(Debug, Clone)]
 pub struct ResolvedAuth {

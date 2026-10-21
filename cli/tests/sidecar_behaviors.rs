@@ -807,3 +807,89 @@ fn read_positions_are_null_where_kakaotalk_has_none_and_skip_unarchived_rooms() 
     );
     assert_eq!(ids.len(), 2);
 }
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// Restores a path's mode when dropped, so a failed assertion still leaves a temp dir that can
+/// be removed.
+struct ModeGuard<'a>(&'a Path, u32);
+
+impl Drop for ModeGuard<'_> {
+    fn drop(&mut self) {
+        set_mode(self.0, self.1);
+    }
+}
+
+#[test]
+fn a_plain_doctor_never_opens_the_container() {
+    let install = install();
+    let container = auth::container_dir(&install.home);
+    set_mode(&container, 0o000);
+    let _restore = ModeGuard(&container, 0o755);
+    let doctor = install.json(&["doctor", "--json"]);
+    assert_eq!(
+        doctor["source_access"],
+        serde_json::json!({ "status": "not_checked", "failed_at": null, "errno": null })
+    );
+    let app = doctor["kakao_app"]["status"].as_str().unwrap();
+    assert!(["running", "not_running"].contains(&app), "{app}");
+}
+
+#[test]
+fn doctor_probe_reports_source_access_with_the_errno_it_met() {
+    let install = install();
+    let probe = |install: &Install| install.json(&["doctor", "--macos-probe", "--json"]);
+    assert_eq!(
+        probe(&install)["source_access"],
+        serde_json::json!({ "status": "ok", "failed_at": null, "errno": null })
+    );
+
+    {
+        set_mode(&install.db_path, 0o000);
+        let _restore = ModeGuard(&install.db_path, 0o644);
+        assert_eq!(
+            probe(&install)["source_access"],
+            serde_json::json!({ "status": "denied", "failed_at": "open", "errno": libc::EACCES })
+        );
+    }
+
+    let container = auth::container_dir(&install.home);
+    {
+        set_mode(&container, 0o000);
+        let _restore = ModeGuard(&container, 0o755);
+        assert_eq!(
+            probe(&install)["source_access"],
+            serde_json::json!({ "status": "denied", "failed_at": "opendir", "errno": libc::EACCES })
+        );
+    }
+
+    std::fs::remove_file(&install.db_path).unwrap();
+    assert_eq!(
+        probe(&install)["source_access"],
+        serde_json::json!({ "status": "missing", "failed_at": "open", "errno": null })
+    );
+    std::fs::remove_dir_all(&container).unwrap();
+    assert_eq!(
+        probe(&install)["source_access"],
+        serde_json::json!({ "status": "missing", "failed_at": "opendir", "errno": libc::ENOENT })
+    );
+}
+
+#[test]
+fn a_running_process_is_found_by_its_exact_name() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let running = katok::kakao::process_running("sleep");
+    child.kill().ok();
+    child.wait().ok();
+    assert_eq!(running, Some(true));
+    assert_eq!(
+        katok::kakao::process_running("katok-test-no-such-process"),
+        Some(false)
+    );
+}

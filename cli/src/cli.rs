@@ -48,7 +48,13 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    /// Report archive and index freshness, whether KakaoTalk is running, and setup state.
+    ///
+    /// Never raises a macOS permission prompt unless `--macos-probe` is given.
     Doctor {
+        /// Also try reading the KakaoTalk container: app, container and database presence,
+        /// and `source_access` with the errno of a real `opendir`/`open`. This can raise the
+        /// macOS "access data from other apps" prompt and waits until it is answered.
         #[arg(long)]
         macos_probe: bool,
         #[arg(long)]

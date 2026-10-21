@@ -24,7 +24,10 @@ use std::path::PathBuf;
 use crate::types::SourceCursor;
 use crate::{Error, Result};
 
-pub use auth::{probe_status, AuthOptions, DatabaseKey, ProbeStatus, ResolvedAuth};
+pub use auth::{
+    probe_source_access, probe_status, process_running, AuthOptions, DatabaseKey, ProbeStatus,
+    ResolvedAuth, SourceAccess,
+};
 pub use media_reader::{
     read_media_chat_ids_resolved, read_media_frames_resolved, read_media_frames_with_options,
     MediaQuery,

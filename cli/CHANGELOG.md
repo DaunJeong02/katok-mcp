@@ -27,6 +27,15 @@
   strings, missing values `null`. Every macOS sync, incremental or not, re-reads them for all
   rooms it covers and stores them on existing `chats` rows only.
 
+### Doctor
+
+- `doctor --json` adds `kakao_app.status` (`running`/`not_running` by `pgrep -x KakaoTalk`,
+  `unknown` if pgrep fails) and `source_access`. With `--macos-probe`, `source_access` holds
+  the outcome of a real `opendir` of the KakaoTalk container and `open(O_RDONLY)` of one
+  database file: `status` `ok`/`denied`/`missing`/`error`, the step that failed and its
+  errno. Without the flag it is `not_checked`: opening the container is what raises the macOS
+  prompt, and a plain `doctor` stays prompt-free.
+
 ### Forget
 
 - `katok forget --chat <chat_id> [--yes]` deletes one chat's rows from every archive table
