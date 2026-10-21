@@ -279,3 +279,242 @@ fn a_fixture_source_filters_too() {
     ]);
     assert_eq!(named["total_messages"], 3);
 }
+
+/// Two synthetic rooms written as a fixture archive: a reply chain in each, and one reply that
+/// crosses from the kept room into the forgotten one.
+fn fixture_archive() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let line = |chat: &str, id: &str, minute: u32, reply: Option<&str>| {
+        serde_json::json!({
+            "account_hash": "acct-synthetic", "chat_id": chat, "chat_name": format!("Room {chat}"),
+            "chat_type": "group", "message_id": id, "sender_id": "u1",
+            "sender_nickname": "Synthetic", "timestamp": format!("2026-01-01T09:{minute:02}:00Z"),
+            "text": format!("synthetic text {id}"), "message_type": "text",
+            "reply_to_message_id": reply,
+        })
+        .to_string()
+    };
+    let lines = [
+        line("chat-forget", "f1", 0, None),
+        line("chat-forget", "f2", 1, Some("f1")),
+        line("chat-forget", "f3", 30, Some("f1")),
+        line("chat-keep", "k1", 0, None),
+        line("chat-keep", "k2", 1, Some("k1")),
+        line("chat-keep", "k3", 40, Some("f3")),
+    ];
+    let path = temp.path().join("rooms.jsonl");
+    std::fs::write(&path, lines.join("\n")).expect("fixture");
+    (temp, path)
+}
+
+fn katok_in(data: &Path, args: &[&str]) -> assert_cmd::Command {
+    let mut command = assert_cmd::Command::cargo_bin("katok").expect("katok binary");
+    command
+        .env("HOME", data)
+        .env("KATOK_EMBEDDER", "local-test")
+        .env_remove("KATOK_ARCHIVE_KEY")
+        .arg("--data-dir")
+        .arg(data)
+        .args(args);
+    command
+}
+
+fn json_in(data: &Path, args: &[&str]) -> Value {
+    let out = katok_in(data, args).assert().success().get_output().clone();
+    serde_json::from_slice(&out.stdout).expect("json stdout")
+}
+
+/// The ids a chat's rows are keyed by, read before anything is deleted, so what is left
+/// afterwards is counted by key rather than through rows that may themselves be gone.
+struct ChatKeys {
+    chat: String,
+    messages: Vec<String>,
+    chunks: Vec<String>,
+    chunk_rowids: Vec<String>,
+    parents: Vec<String>,
+}
+
+fn keys_of(data: &Path, chat: &str) -> ChatKeys {
+    let conn = Connection::open(data.join("archive.sqlite3")).expect("archive");
+    let column = |sql: &str| -> Vec<String> {
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        stmt.query_map([chat], |row| row.get::<_, rusqlite::types::Value>(0))
+            .expect("query")
+            .map(|value| match value.expect("row") {
+                rusqlite::types::Value::Integer(n) => n.to_string(),
+                rusqlite::types::Value::Text(text) => text,
+                other => panic!("unexpected key {other:?}"),
+            })
+            .collect()
+    };
+    ChatKeys {
+        chat: chat.to_string(),
+        messages: column("SELECT message_id FROM messages WHERE chat_id = ?1"),
+        chunks: column("SELECT chunk_id FROM chunks WHERE chat_id = ?1"),
+        chunk_rowids: column("SELECT rowid FROM chunks WHERE chat_id = ?1"),
+        parents: column("SELECT parent_id FROM parent_chunks WHERE chat_id = ?1"),
+    }
+}
+
+/// Rows per archive table that `keys` address.
+fn rows_by_key(data: &Path, keys: &ChatKeys) -> std::collections::BTreeMap<&'static str, i64> {
+    let conn = Connection::open(data.join("archive.sqlite3")).expect("archive");
+    let list = |values: &[String]| -> String {
+        values
+            .iter()
+            .map(|value| format!("'{}'", value.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let (m, c, r, p) = (
+        list(&keys.messages),
+        list(&keys.chunks),
+        keys.chunk_rowids.join(","),
+        list(&keys.parents),
+    );
+    let chat = list(std::slice::from_ref(&keys.chat));
+    [
+        ("messages", format!("messages WHERE message_id IN ({m})")),
+        ("chats", format!("chats WHERE chat_id IN ({chat})")),
+        ("chunks", format!("chunks WHERE chunk_id IN ({c})")),
+        ("chunks_fts", format!("chunks_fts WHERE rowid IN ({r})")),
+        (
+            "chunk_messages",
+            format!("chunk_messages WHERE chunk_id IN ({c}) OR message_id IN ({m})"),
+        ),
+        (
+            "chunk_parent_refs",
+            format!("chunk_parent_refs WHERE child_chunk_id IN ({c}) OR parent_chunk_id IN ({c})"),
+        ),
+        (
+            "parent_chunks",
+            format!("parent_chunks WHERE parent_id IN ({p})"),
+        ),
+        (
+            "parent_chunk_children",
+            format!("parent_chunk_children WHERE parent_id IN ({p}) OR chunk_id IN ({c})"),
+        ),
+        (
+            "reply_edges",
+            format!("reply_edges WHERE child_message_id IN ({m})"),
+        ),
+    ]
+    .into_iter()
+    .map(|(table, from)| {
+        let count = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {from}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|error| panic!("{table}: {error}"));
+        (table, count)
+    })
+    .collect()
+}
+
+#[test]
+fn forget_counts_first_then_removes_one_chat_everywhere() {
+    let (fixture_dir, fixture) = fixture_archive();
+    let data = fixture_dir.path().join("data");
+    let fixture = fixture.to_str().unwrap();
+    json_in(&data, &["sync", "--source", "fixture", fixture, "--json"]);
+    json_in(&data, &["index", "--json"]);
+    for chat in ["chat-forget", "chat-keep"] {
+        json_in(&data, &["transcript", "--chat", chat, "--json"]);
+        let media = data.join("media").join(chat).join("album");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("a.jpg"), b"synthetic").unwrap();
+        std::fs::write(media.join("../b.jpg"), b"synthetic").unwrap();
+    }
+    let forget_keys = keys_of(&data, "chat-forget");
+    let keep_keys = keys_of(&data, "chat-keep");
+    let before = rows_by_key(&data, &forget_keys);
+    let kept_before = rows_by_key(&data, &keep_keys);
+    for (table, count) in &before {
+        assert!(*count > 0, "the fixture must give {table} rows to delete");
+    }
+
+    let preview = json_in(&data, &["forget", "--chat", "chat-forget", "--json"]);
+    assert_eq!(preview["deleted"], false);
+    let reported = &preview["chats"][0];
+    for (table, count) in &before {
+        assert_eq!(reported[*table], *count, "{table} count in the preview");
+    }
+    assert_eq!(reported["media_files"], 2);
+    assert_eq!(reported["transcripts"], 1);
+    assert_eq!(preview["semantic_rebuild_required"], true);
+    assert_eq!(
+        rows_by_key(&data, &forget_keys),
+        before,
+        "a preview deletes nothing"
+    );
+    assert!(data.join("media").join("chat-forget").exists());
+    assert_eq!(
+        json_in(&data, &["doctor", "--json"])["semantic_rebuild_required"],
+        false
+    );
+
+    let done = json_in(
+        &data,
+        &["forget", "--chat", "chat-forget", "--yes", "--json"],
+    );
+    assert_eq!(done["deleted"], true);
+    assert_eq!(done["next_step"], "katok index --full --json");
+    for (table, count) in rows_by_key(&data, &forget_keys) {
+        assert_eq!(count, 0, "{table} still holds the forgotten chat");
+    }
+    let kept_after = rows_by_key(&data, &keep_keys);
+    let mut kept_expected = kept_before.clone();
+    // The one reference from the kept room into the forgotten one goes; the rest stays.
+    kept_expected.insert("chunk_parent_refs", kept_before["chunk_parent_refs"] - 1);
+    assert_eq!(kept_after, kept_expected);
+    let edge: (Option<String>, Option<String>) = Connection::open(data.join("archive.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT parent_chunk_id, unresolved_reason FROM reply_edges
+             WHERE child_message_id = 'k3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the kept room's reply edge stays");
+    assert_eq!(edge, (None, Some("parent_not_in_archive".to_string())));
+
+    assert!(!data.join("media").join("chat-forget").exists());
+    assert!(data.join("media").join("chat-keep").join("b.jpg").exists());
+    let transcripts: Vec<String> = std::fs::read_dir(data.join("transcripts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(transcripts.len(), 1);
+    assert!(transcripts[0].starts_with("chat-keep-"));
+
+    let rooms = json_in(&data, &["rooms", "--json"]);
+    assert_eq!(rooms.as_array().unwrap().len(), 1);
+    assert_eq!(rooms[0]["chat_id"], "chat-keep");
+    let hits = json_in(&data, &["search", "bm25", "f1", "--json"]);
+    assert_eq!(hits, serde_json::json!([]));
+
+    assert_eq!(
+        json_in(&data, &["doctor", "--json"])["semantic_rebuild_required"],
+        true
+    );
+    json_in(&data, &["index", "--full", "--json"]);
+    assert_eq!(
+        json_in(&data, &["doctor", "--json"])["semantic_rebuild_required"],
+        false
+    );
+}
+
+#[test]
+fn forget_refuses_a_chat_id_that_names_a_path() {
+    let (dir, _) = fixture_archive();
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(data.join("media")).unwrap();
+    std::fs::write(dir.path().join("outside.txt"), b"synthetic").unwrap();
+    for chat in ["..", "../..", "a/b"] {
+        katok_in(&data, &["forget", "--chat", chat, "--yes", "--json"])
+            .assert()
+            .failure();
+    }
+    assert!(dir.path().join("outside.txt").exists());
+    assert!(data.join("media").exists());
+}

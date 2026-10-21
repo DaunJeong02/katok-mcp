@@ -135,6 +135,23 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Delete chats from the archive: messages, chunks, search rows, saved media, transcripts.
+    ///
+    /// Without `--yes` nothing is deleted and the report counts what would be. Semantic
+    /// vectors cannot be removed one chat at a time, so a deletion leaves a rebuild marker in
+    /// the semantic index directory, reported by `doctor`, until the next `katok index` (run
+    /// `--full`). KakaoTalk itself is untouched: a later sync that reads the chat archives it
+    /// again, so drop it from `sync --chat` first.
+    Forget {
+        /// chat_id to delete; repeat for more.
+        #[arg(long = "chat", value_name = "CHAT_ID", required = true)]
+        chats: Vec<String>,
+        /// Delete. Without it, only report what would be deleted.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
     Chunks {
         #[arg(long)]
         chat: String,

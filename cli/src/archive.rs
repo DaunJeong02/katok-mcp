@@ -2,12 +2,14 @@ use crate::{Error, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
+mod forget;
 mod model;
 mod parent;
 mod read;
 mod schema;
 mod write;
 
+pub use forget::ChatFootprint;
 pub use model::{ChunkDraft, DeletedMessage, ParentChunkDraft, StoredMessage};
 pub use read::{RAW_MESSAGES_FOR_CHAT_SINCE_QUERY, TAIL_REBUILD_START_QUERY};
 pub use write::{

@@ -327,11 +327,15 @@ katok transcript --chat <chat-id> --json
 katok transcript --chat <chat-id> --since 2026-07-20T00:00:00+09:00 --json
 katok media get --chat <chat-id> --no-cdn --json
 katok wipe-index --yes --json
+katok forget --chat <chat-id> --json
+katok forget --chat <chat-id> --yes --json
 katok send --chat <chat-id> --dry-run --json
 katok send --chat <chat-id> --text "메시지" --accept-use-policy --json
 ```
 
 `katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
+
+`katok forget --chat <chat-id>`는 한 방을 아카이브에서 지웁니다. `--chat`은 여러 번 줄 수 있습니다. `--yes` 없이 실행하면 아무것도 지우지 않고 지울 행 수만 테이블별로 보여 줍니다. `--yes`를 주면 그 방의 `messages`·`chats`·`chunks`·`chunks_fts`·`chunk_messages`·`chunk_parent_refs`·`parent_chunks`·`parent_chunk_children`·`reply_edges` 행을 한 트랜잭션으로 지우고, 기본 위치(`<data-dir>/media/<chat-id>`, `<data-dir>/transcripts`)의 저장된 미디어와 transcript도 지웁니다. `--out`으로 다른 곳에 저장한 파일은 추적하지 않습니다. 다른 방에서 이 방 메시지에 단 답장은 행이 남고 부모만 `parent_not_in_archive`로 바뀝니다. semantic 벡터는 방 단위로 지울 수 없으므로, 인덱스가 있으면 semantic 디렉터리에 `REBUILD_REQUIRED` 표식을 남기고 `next_step`으로 `katok index --full --json`을 안내합니다. `doctor --json`의 `semantic_rebuild_required`가 이 표식을 보여 줍니다. 다음 `katok index`는 아카이브의 현재 창만으로 새 generation을 만들고 옛 generation을 지우므로, 시작 전에 있던 표식을 지웁니다(실행 도중에 생긴 표식은 남깁니다). 카카오톡 원본은 건드리지 않으므로, 그 방을 읽는 sync가 다시 돌면 다시 들어옵니다. 먼저 `sync --chat` 목록에서 빼세요.
 
 권한 진단이 필요할 때만:
 

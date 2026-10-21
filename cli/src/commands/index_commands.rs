@@ -23,6 +23,9 @@ pub(crate) fn run(
     if !archive_path.is_file() {
         anyhow::bail!("archive is missing; run katok sync before katok index");
     }
+    // Read before the archive: a chat forgotten after this point may still be in the windows
+    // loaded below, so its marker has to outlive this run.
+    let marker = super::forget::rebuild_marker(semantic_dir);
     let archive = Archive::open(archive_path).context("open archive")?;
     let candidate_chunks = archive.chunk_count().context("count chunks")?;
     let parents = archive
@@ -37,6 +40,7 @@ pub(crate) fn run(
             parents: &parents,
             semantic_dir,
             candidate_chunks,
+            marker: marker.as_deref(),
         });
     }
     let documents = planned_semantic_documents_for_parents(&parents, semantic_dir);
@@ -61,6 +65,7 @@ struct LiveIndexInput<'a> {
     parents: &'a [ParentChunk],
     semantic_dir: &'a Path,
     candidate_chunks: usize,
+    marker: Option<&'a str>,
 }
 
 fn run_live_index(input: LiveIndexInput<'_>) -> Result<()> {
@@ -71,6 +76,9 @@ fn run_live_index(input: LiveIndexInput<'_>) -> Result<()> {
         input.full,
     ))?
     .context("index semantic documents")?;
+    // The generation just committed holds only the windows loaded at the start, so vectors of
+    // a chat forgotten before then are gone with the old generations.
+    super::forget::clear_rebuild_marker(input.semantic_dir, input.marker);
     let generation = katok::semantic::current_generation(input.semantic_dir)
         .context("resolve committed semantic generation")?;
     let documents = planned_semantic_documents_for_parents(input.parents, &generation);

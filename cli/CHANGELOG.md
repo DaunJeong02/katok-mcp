@@ -10,6 +10,16 @@
   so a later sync without `--chat` still reads the rows of rooms the filtered one skipped. A
   new set reads its chats in full once. Refused with `--prune-preview`/`--prune-deleted`.
 
+### Forget
+
+- `katok forget --chat <chat_id> [--yes]` deletes one chat's rows from every archive table
+  (messages, chats, chunks, chunk FTS, chunk/parent links, parent windows, reply edges) in one
+  transaction, plus its media and transcripts in their default locations. Without `--yes` it
+  only counts. A reply from another chat into the forgotten one keeps its row and loses its
+  parent. Semantic vectors cannot be dropped per chat, so a `REBUILD_REQUIRED` marker is left
+  in the semantic directory and reported as `doctor --json` `semantic_rebuild_required` until
+  an index run that started after it commits.
+
 ### Index
 
 - `katok index` now validates the staged generation against the archive snapshot it

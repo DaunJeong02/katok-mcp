@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod chunk_commands;
+mod forget;
 mod freshness;
 mod index_commands;
 mod media_commands;
@@ -29,6 +30,7 @@ pub(crate) fn command_requests_json(command: &Commands) -> bool {
         | Commands::Sync { json, .. }
         | Commands::Index { json, .. }
         | Commands::WipeIndex { json, .. }
+        | Commands::Forget { json, .. }
         | Commands::Chunks { json, .. }
         | Commands::Transcript { json, .. }
         | Commands::Messages { json, .. }
@@ -127,6 +129,9 @@ pub(crate) fn run(
             json,
         } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
+        Commands::Forget { chats, yes, json } => {
+            forget::run(&chats, yes, json, &archive_path, &data_dir, &semantic_dir)
+        }
         Commands::Messages {
             chat,
             since,
@@ -376,6 +381,7 @@ fn run_doctor(
         "archive": archive_path,
         "semantic_index": semantic_dir,
         "freshness": freshness::load(&data_dir, &archive_path, &semantic_dir)?,
+        "semantic_rebuild_required": forget::rebuild_marker(&semantic_dir).is_some(),
         "local_first": true,
         "macos": cfg!(target_os = "macos"),
         "source_adapter": {
