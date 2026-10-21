@@ -361,6 +361,8 @@ fn the_newest_time_seen_never_moves_back() {
         text: format!("synthetic {id}"),
         message_type: "text".into(),
         reply_to_message_id: None,
+        mentioned_user_ids: Vec::new(),
+        mentions_all: false,
     };
     let cursor = |archive: &Archive| -> String {
         archive

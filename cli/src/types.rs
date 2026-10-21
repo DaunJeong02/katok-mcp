@@ -14,6 +14,13 @@ pub struct RawMessage {
     pub text: String,
     pub message_type: String,
     pub reply_to_message_id: Option<String>,
+    /// Decimal user ids the message mentions, from KakaoTalk's `attachment` metadata. Strings
+    /// because the ids exceed what a JSON number holds exactly in JavaScript.
+    #[serde(default)]
+    pub mentioned_user_ids: Vec<String>,
+    /// The message mentions everyone in the room.
+    #[serde(default)]
+    pub mentions_all: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +304,10 @@ pub struct MessageRow {
     pub message_type: String,
     pub reply_to_message_id: Option<String>,
     pub is_feed: bool,
+    /// See [`RawMessage::mentioned_user_ids`]. Empty for a message archived before mentions
+    /// were read, until a full sync reads it again.
+    pub mentioned_user_ids: Vec<String>,
+    pub mentions_all: bool,
 }
 
 /// One chat as the archive knows it, with tail metadata for cursoring and room lists.

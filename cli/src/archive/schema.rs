@@ -143,6 +143,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         "chunk_settings",
         "chunker_version",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // NULL is "mentions nobody", so rows archived before the column existed already read
+    // right, and a sync that finds no mention in them changes nothing.
+    add_column_if_missing(conn, "messages", "mentioned_user_ids", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "messages",
+        "mentions_all",
+        "INTEGER NOT NULL DEFAULT 0",
     )
 }
 

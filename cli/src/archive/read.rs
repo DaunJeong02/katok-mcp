@@ -330,7 +330,8 @@ impl Archive {
             .conn
             .prepare(
                 "SELECT account_hash, chat_id, chat_name, chat_type, message_id, sender_id,
-                        sender_nickname, timestamp, text, message_type, reply_to_message_id
+                        sender_nickname, timestamp, text, message_type, reply_to_message_id,
+                        mentioned_user_ids, mentions_all
                  FROM messages
                  WHERE chat_id = ?1
                    AND timestamp >= COALESCE(?2, '')
@@ -350,6 +351,10 @@ impl Archive {
                     None => sender_account_hash(&sender_id) == account_hash,
                 };
                 let is_feed = crate::transcript::is_feed(&message_type, &text);
+                let mentioned_user_ids = row
+                    .get::<_, Option<String>>(11)?
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default();
                 Ok(MessageRow {
                     message_id: row.get(4)?,
                     chat_id: row.get(1)?,
@@ -363,6 +368,8 @@ impl Archive {
                     message_type,
                     reply_to_message_id: row.get(10)?,
                     is_feed,
+                    mentioned_user_ids,
+                    mentions_all: row.get(12)?,
                 })
             })
             .map_err(Error::Sql)?

@@ -362,8 +362,9 @@ impl Archive {
             .prepare_cached(
                 "INSERT INTO messages
              (account_hash, chat_id, chat_name, chat_type, message_id, sender_id,
-              sender_nickname, timestamp, text, message_type, reply_to_message_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              sender_nickname, timestamp, text, message_type, reply_to_message_id,
+              mentioned_user_ids, mentions_all)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(account_hash, chat_id, message_id) DO UPDATE SET
                  chat_name = excluded.chat_name,
                  chat_type = excluded.chat_type,
@@ -372,7 +373,9 @@ impl Archive {
                  timestamp = excluded.timestamp,
                  text = excluded.text,
                  message_type = excluded.message_type,
-                 reply_to_message_id = excluded.reply_to_message_id
+                 reply_to_message_id = excluded.reply_to_message_id,
+                 mentioned_user_ids = excluded.mentioned_user_ids,
+                 mentions_all = excluded.mentions_all
              WHERE messages.chat_name <> excluded.chat_name
                 OR messages.chat_type <> excluded.chat_type
                 OR messages.sender_id <> excluded.sender_id
@@ -380,7 +383,9 @@ impl Archive {
                 OR messages.timestamp <> excluded.timestamp
                 OR messages.text <> excluded.text
                 OR messages.message_type <> excluded.message_type
-                OR messages.reply_to_message_id IS NOT excluded.reply_to_message_id",
+                OR messages.reply_to_message_id IS NOT excluded.reply_to_message_id
+                OR messages.mentioned_user_ids IS NOT excluded.mentioned_user_ids
+                OR messages.mentions_all <> excluded.mentions_all",
             )
             .map_err(Error::Sql)?
             .execute(params![
@@ -394,7 +399,9 @@ impl Archive {
                 message.timestamp.to_rfc3339(),
                 message.text,
                 message.message_type,
-                message.reply_to_message_id
+                message.reply_to_message_id,
+                mentioned_user_ids_column(&message.mentioned_user_ids),
+                message.mentions_all
             ])
             .map_err(Error::Sql)?;
         Ok(match (exists, changed) {
@@ -765,6 +772,11 @@ impl Archive {
         }
         Ok(())
     }
+}
+
+/// `messages.mentioned_user_ids`: a JSON array of decimal ids, or NULL when there are none.
+fn mentioned_user_ids_column(ids: &[String]) -> Option<String> {
+    (!ids.is_empty()).then(|| serde_json::Value::from(ids.to_vec()).to_string())
 }
 
 /// `sync_cursors.source_id` prefix of the per-database rowid cursors of `source`, each stored as

@@ -10,6 +10,14 @@
   so a later sync without `--chat` still reads the rows of rooms the filtered one skipped. A
   new set reads its chats in full once. Refused with `--prune-preview`/`--prune-deleted`.
 
+### Messages
+
+- `katok messages --json` adds `mentioned_user_ids` (decimal strings) and `mentions_all` to
+  each message, read from the top-level `mentions[].user_id` and `all_mention` of KakaoTalk's
+  `attachment` JSON; a reply's `src_mentions` is not this message's mention. Stored in two new
+  `messages` columns added on open; a row without mentions keeps NULL, so the first sync after
+  the upgrade rewrites only rows that do have one.
+
 ### Forget
 
 - `katok forget --chat <chat_id> [--yes]` deletes one chat's rows from every archive table

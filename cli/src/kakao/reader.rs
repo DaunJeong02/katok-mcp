@@ -407,6 +407,36 @@ fn reply_parent_log_id(supplement: Option<&str>) -> Option<i64> {
     lookup_reply_id(root)
 }
 
+/// Who a message mentions: the `user_id`s of the top-level `mentions` array of its
+/// `attachment` JSON, and whether it carries `all_mention`. A reply's `src_mentions`, and any
+/// `mentions` nested under the quoted message, belong to the message being quoted, so neither
+/// is read. Nor is the body: an "@" in the text proves nothing.
+fn mentions(attachment: Option<&str>) -> (Vec<String>, bool) {
+    let Some(serde_json::Value::Object(root)) = attachment
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| serde_json::from_str(raw).ok())
+    else {
+        return (Vec::new(), false);
+    };
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(serde_json::Value::Array(entries)) = root.get("mentions") {
+        for id in entries
+            .iter()
+            .filter_map(|entry| entry.get("user_id").and_then(coerce_log_id))
+        {
+            let id = id.to_string();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    let all = matches!(
+        root.get("all_mention"),
+        Some(serde_json::Value::Object(_) | serde_json::Value::Bool(true))
+    );
+    (ids, all)
+}
+
 fn coerce_log_id(value: &serde_json::Value) -> Option<i64> {
     match value {
         serde_json::Value::Number(num) => num.as_i64().filter(|id| *id > 0),
@@ -535,6 +565,7 @@ fn read_one(
             .or_else(|| reply_parent_log_id(supplement.as_deref()))
             .filter(|parent| *parent != log_id)
             .map(|parent| format!("{chat_id}-{parent}"));
+        let (mentioned_user_ids, mentions_all) = mentions(attachment.as_deref());
 
         let chat_id_str = chat_id.to_string();
         chats
@@ -557,6 +588,8 @@ fn read_one(
             text,
             message_type,
             reply_to_message_id,
+            mentioned_user_ids,
+            mentions_all,
         });
     }
 
@@ -865,6 +898,37 @@ mod tests {
             reply_parent_log_id(Some(r#"{"attachment":{"src_logId":4242}}"#)),
             None
         );
+    }
+
+    #[test]
+    fn reads_mentions_from_the_top_level_of_the_attachment() {
+        let mentioned = r#"{"mentions":[{"user_id":500,"at":[1],"len":5},
+            {"user_id":"600","at":[9],"len":3},{"user_id":500,"at":[20],"len":5}]}"#;
+        assert_eq!(
+            mentions(Some(mentioned)),
+            (vec!["500".to_string(), "600".to_string()], false),
+            "each id once, in order, numbers and strings alike"
+        );
+        assert_eq!(
+            mentions(Some(r#"{"mentions":[{"user_id":9007199254740993}]}"#)).0,
+            ["9007199254740993"],
+            "ids past 2^53 keep every digit"
+        );
+        assert_eq!(
+            mentions(Some(r#"{"all_mention":{"at":0}}"#)),
+            (Vec::new(), true)
+        );
+    }
+
+    #[test]
+    fn a_quoted_message_s_mentions_are_not_this_message_s() {
+        let reply = r#"{"src_logId":20,"src_mentions":[{"user_id":500}],
+            "src":{"mentions":[{"user_id":600}]}}"#;
+        assert_eq!(mentions(Some(reply)), (Vec::new(), false));
+        for raw in ["", "not json", "[1,2]", r#"{"mentions":[{"at":[1]}]}"#] {
+            assert_eq!(mentions(Some(raw)), (Vec::new(), false), "{raw}");
+        }
+        assert_eq!(mentions(None), (Vec::new(), false));
     }
 
     #[test]

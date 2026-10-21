@@ -518,3 +518,108 @@ fn forget_refuses_a_chat_id_that_names_a_path() {
     assert!(dir.path().join("outside.txt").exists());
     assert!(data.join("media").exists());
 }
+
+#[test]
+fn messages_report_who_each_message_mentions() {
+    let install = install();
+    let me = TEST_USER_ID.to_string();
+    install.insert(
+        GROUP_A,
+        10,
+        PEER,
+        Some(&format!(
+            r#"{{"mentions":[{{"user_id":{TEST_USER_ID},"at":[1],"len":4}},{{"user_id":600,"at":[7],"len":4}}]}}"#
+        )),
+    );
+    install.insert(GROUP_A, 11, PEER, Some(r#"{"all_mention":{"at":0}}"#));
+    install.insert(
+        GROUP_A,
+        12,
+        PEER,
+        Some(&format!(
+            r#"{{"src_logId":10,"src_mentions":[{{"user_id":{TEST_USER_ID}}}]}}"#
+        )),
+    );
+    install.json(&["sync", "--source", "macos", "--json"]);
+    let listed = install.json(&["messages", "--chat", "100", "--json"]);
+    let by_id = |id: &str| -> Value {
+        listed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["message_id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} missing"))
+    };
+    assert_eq!(
+        by_id("100-10")["mentioned_user_ids"],
+        serde_json::json!([me, "600"])
+    );
+    assert_eq!(by_id("100-10")["mentions_all"], false);
+    assert_eq!(by_id("100-11")["mentioned_user_ids"], serde_json::json!([]));
+    assert_eq!(by_id("100-11")["mentions_all"], true);
+    assert_eq!(
+        by_id("100-12")["mentioned_user_ids"],
+        serde_json::json!([]),
+        "a reply quoting a mention does not mention anyone itself"
+    );
+    assert_eq!(by_id("100-1")["mentioned_user_ids"], serde_json::json!([]));
+    assert_eq!(by_id("100-1")["mentions_all"], false);
+}
+
+#[test]
+fn an_archive_from_before_mentions_upgrades_without_rewriting_its_rows() {
+    let (dir, fixture) = fixture_archive();
+    let data = dir.path().join("data");
+    let fixture = fixture.to_str().unwrap();
+    json_in(&data, &["sync", "--source", "fixture", fixture, "--json"]);
+    let archive = Connection::open(data.join("archive.sqlite3")).unwrap();
+    archive
+        .execute_batch(
+            "ALTER TABLE messages DROP COLUMN mentioned_user_ids;
+             ALTER TABLE messages DROP COLUMN mentions_all;",
+        )
+        .expect("rewind the schema");
+    drop(archive);
+
+    let again = json_in(&data, &["sync", "--source", "fixture", fixture, "--json"]);
+    assert_eq!(
+        again["updated_messages"], 0,
+        "no mention anywhere, nothing changed"
+    );
+    let listed = json_in(&data, &["messages", "--chat", "chat-keep", "--json"]);
+    assert_eq!(
+        listed["messages"][0]["mentioned_user_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(listed["messages"][0]["mentions_all"], false);
+
+    let mut lines: Vec<Value> = std::fs::read_to_string(fixture)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    lines[3]["mentioned_user_ids"] = serde_json::json!(["600"]);
+    let mentioned = dir.path().join("mentioned.jsonl");
+    let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+    std::fs::write(&mentioned, body.join("\n")).unwrap();
+    let report = json_in(
+        &data,
+        &[
+            "sync",
+            "--source",
+            "fixture",
+            mentioned.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(
+        report["updated_messages"], 1,
+        "only the row that gained a mention"
+    );
+    let listed = json_in(&data, &["messages", "--chat", "chat-keep", "--json"]);
+    assert_eq!(
+        listed["messages"][0]["mentioned_user_ids"],
+        serde_json::json!(["600"])
+    );
+}

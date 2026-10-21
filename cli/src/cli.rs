@@ -179,7 +179,9 @@ pub(crate) enum Commands {
     ///
     /// Reads the archive, not the live KakaoTalk database. Returns the newest `--limit` rows
     /// inside the optional `--since` / `--until` RFC3339 range, ordered oldest first, so a
-    /// caller can page a mirror view or read a delta after a cursor.
+    /// caller can page a mirror view or read a delta after a cursor. Each message carries
+    /// `mentioned_user_ids` (decimal strings) and `mentions_all` from KakaoTalk's mention
+    /// metadata, never from the body text.
     Messages {
         /// chat_id as reported by `rooms` or `source chats`.
         #[arg(long)]
