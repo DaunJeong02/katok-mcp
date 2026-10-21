@@ -20,6 +20,19 @@ pub trait SourceAdapter {
             incremental: false,
         })
     }
+
+    /// [`Self::messages_since`] for `chat_ids` only. This default reads everything and drops the
+    /// other chats afterwards; a source that can filter while reading overrides it.
+    fn messages_since_for_chats(
+        &self,
+        cursors: &[SourceCursor],
+        chat_ids: &[String],
+    ) -> Result<SourceRead> {
+        let mut read = self.messages_since(cursors)?;
+        read.messages
+            .retain(|message| chat_ids.contains(&message.chat_id));
+        Ok(read)
+    }
 }
 
 /// One read of a source for `sync`.
@@ -125,6 +138,27 @@ impl SourceAdapter for MacosAdapter {
     /// Not memoized: each call reads the databases from `cursors` on.
     fn messages_since(&self, cursors: &[SourceCursor]) -> Result<SourceRead> {
         let output = crate::kakao::read_kakao_since(&self.options, cursors)?;
+        Ok(SourceRead {
+            messages: output.messages,
+            cursors: output.cursors,
+            incremental: output.incremental,
+        })
+    }
+
+    /// Filters in the query itself, so other chats' messages are never read.
+    fn messages_since_for_chats(
+        &self,
+        cursors: &[SourceCursor],
+        chat_ids: &[String],
+    ) -> Result<SourceRead> {
+        let ids = chat_ids
+            .iter()
+            .map(|id| id.trim().parse::<i64>())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| {
+                crate::Error::Kakao("--chat expects numeric KakaoTalk chat ids".to_string())
+            })?;
+        let output = crate::kakao::read_kakao_since_for_chats(&self.options, cursors, &ids)?;
         Ok(SourceRead {
             messages: output.messages,
             cursors: output.cursors,

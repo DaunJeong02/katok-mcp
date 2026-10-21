@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Sync
+
+- `katok sync --chat <chat_id>` (repeatable) reads and archives only the named chats. The
+  macOS reader filters in its query, so other rooms' bodies are never read. A filtered sync
+  keeps an incremental cursor of its own per set of chats and never moves the unfiltered one,
+  so a later sync without `--chat` still reads the rows of rooms the filtered one skipped. A
+  new set reads its chats in full once. Refused with `--prune-preview`/`--prune-deleted`.
+
 ### Index
 
 - `katok index` now validates the staged generation against the archive snapshot it

@@ -87,6 +87,18 @@ pub(crate) enum Commands {
         /// stores the cursor, so the first one after a full sync is already incremental.
         #[arg(long, conflicts_with_all = ["prune_preview", "prune_deleted"])]
         incremental: bool,
+        /// Sync only this chat_id; repeat for more. Other rooms are neither read nor archived.
+        ///
+        /// A filtered sync keeps its own `--incremental` cursor for this exact set of chats, so
+        /// a later sync without `--chat` still reads every room's new rows. A different set
+        /// starts over: its first sync reads those chats in full. Cannot be combined with
+        /// `--prune-preview`/`--prune-deleted`.
+        #[arg(
+            long = "chat",
+            value_name = "CHAT_ID",
+            conflicts_with_all = ["prune_preview", "prune_deleted"]
+        )]
+        chats: Vec<String>,
     },
     Index {
         /// Rebuild every vector instead of reusing unchanged vectors from the committed generation.

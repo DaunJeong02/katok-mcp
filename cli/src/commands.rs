@@ -82,6 +82,7 @@ pub(crate) fn run(
             prune_preview,
             prune_deleted,
             incremental,
+            chats,
         } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
             run_sync(
@@ -93,6 +94,7 @@ pub(crate) fn run(
                     prune_preview,
                     prune_deleted,
                     incremental,
+                    chats,
                 },
                 &config,
                 &archive_path,
@@ -427,6 +429,41 @@ struct SyncOptions {
     /// Read past the stored source cursors (`--incremental`). Never with a prune, which has
     /// to see everything the source still holds (clap refuses the combination).
     incremental: bool,
+    /// `--chat`: read and archive only these chats. Empty means every chat.
+    chats: Vec<String>,
+}
+
+/// The `sync_cursors` namespace a sync reads and writes its source cursors under.
+///
+/// The cursors are the newest rows of the whole source table, whichever chat they belong to. A
+/// filtered sync that stored them under the plain namespace would move the unfiltered cursor
+/// past rows of rooms it skipped, and the next unfiltered `--incremental` would never read them.
+/// So each set of chats gets its own namespace, keyed by a hash of the ids `chat_filter`
+/// sorted.
+fn cursor_namespace(source: &str, chats: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    if chats.is_empty() {
+        return source.to_string();
+    }
+    let digest = Sha256::digest(chats.join(",").as_bytes());
+    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{source}#chats-{hash}")
+}
+
+/// `--chat` values trimmed, sorted and deduplicated. A blank one is refused rather than
+/// dropped: dropping the only value would turn a filtered sync into one of every room.
+fn chat_filter(raw: &[String]) -> Result<Vec<String>> {
+    let mut ids = Vec::with_capacity(raw.len());
+    for id in raw {
+        let id = id.trim();
+        if id.is_empty() {
+            anyhow::bail!("--chat needs a chat_id");
+        }
+        ids.push(id.to_string());
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 fn run_sync(
@@ -443,20 +480,26 @@ fn run_sync(
         prune_preview,
         prune_deleted,
         incremental,
+        chats,
     } = options;
+    let chats = chat_filter(&chats)?;
     let adapter = adapter_for_source(source, path, data_dir)?;
     let archive = Archive::open(archive_path).context("open archive")?;
+    let cursor_source = cursor_namespace(source, &chats);
     let cursors = if incremental {
         archive
-            .source_cursors(source)
+            .source_cursors(&cursor_source)
             .context("read source cursors")?
     } else {
         Vec::new()
     };
     let read_started = Instant::now();
-    let read = adapter
-        .messages_since(&cursors)
-        .context("read source messages")?;
+    let read = if chats.is_empty() {
+        adapter.messages_since(&cursors)
+    } else {
+        adapter.messages_since_for_chats(&cursors, &chats)
+    }
+    .context("read source messages")?;
     let messages = read.messages;
     let read_source = read_started.elapsed().as_millis();
     // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
@@ -466,7 +509,7 @@ fn run_sync(
         let upsert_started = Instant::now();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
         archive
-            .record_source_cursors(source, &read.cursors)
+            .record_source_cursors(&cursor_source, &read.cursors)
             .context("record source cursors")?;
         let upsert_messages = upsert_started.elapsed().as_millis();
 

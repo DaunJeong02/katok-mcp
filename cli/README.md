@@ -252,6 +252,10 @@ sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가
 
 `katok sync --source macos --incremental --json`은 카카오톡 DB에서 지난 sync 뒤에 들어온 행만 읽습니다. 매 sync가 DB 파일마다 가장 최근 로컬 행 8개(`NTChatMessage`의 rowid와 그 행의 `chatId`·`logId`)를 아카이브에 남기고, 다음 증분 sync는 그 가운데 아직 같은 메시지를 가리키는 가장 최근 행 뒤부터 읽습니다. rowid는 보낸 시각이 아니라 이 맥에 저장된 순서라서, 맥이 잠들었다 깨어 늦게 받은 옛 메시지도 놓치지 않습니다. 남긴 행이 모두 지워졌거나 바뀌었거나(교체·VACUUM) 커서가 없는 DB는 전체를 읽습니다. 증분 sync는 새로 들어온 행과 교체된 행만 보므로, 카카오톡이 제자리에서 고친 메시지와 새 메시지가 없는 방의 이름 변경은 플래그 없는 다음 sync가 반영합니다. 출력에는 이 플래그를 줬을 때만 `incremental`(모든 DB를 커서 뒤부터 읽었는지)이 붙습니다. `--prune-preview`/`--prune-deleted`와 함께 쓸 수 없습니다.
 
+`katok sync --source macos --chat <chat_id> --json`은 지정한 방만 읽어 아카이브에 넣습니다. `--chat`은 여러 번 줄 수 있습니다. 다른 방의 행은 카카오톡 DB 쿼리 단계에서 걸러지므로 본문을 메모리로 읽지도 않고, 아카이브의 `chats`에도 들어가지 않습니다. macOS 소스의 chat_id는 숫자여야 하고, 빈 값은 거부합니다(빈 값을 버리면 모든 방을 읽는 sync가 되기 때문입니다). `--prune-preview`/`--prune-deleted`와 함께 쓸 수 없습니다.
+
+커서 설계: 증분 커서는 방과 무관하게 DB 테이블 전체의 가장 최근 행 8개입니다. 필터 sync가 이 커서를 무필터 커서 자리에 저장하면, 건너뛴 방의 새 행이 커서 앞에 남아 다음 무필터 `--incremental`이 그 행을 영영 읽지 않습니다. 그래서 필터 sync는 무필터 커서를 읽지도 쓰지도 않고, 방 집합(정렬·중복 제거한 chat_id의 해시)마다 별도 커서를 씁니다. 같은 집합으로 다시 실행하면 순서·중복과 무관하게 증분으로 읽고, 집합이 바뀌면(방 추가·제거) 첫 실행은 그 방들을 전체로 읽습니다. 새로 추가한 방의 과거 기록도 그때 들어옵니다. 집합마다 남는 커서는 DB 파일당 8행이라 지우지 않습니다.
+
 요구사항:
 
 - 터미널 앱이 `~/Library/Containers/com.kakao.KakaoTalkMac/` 아래 파일을 읽을 수 있도록 전체 디스크 접근 권한을 받아야 합니다.
@@ -310,6 +314,7 @@ katok doctor --json
 katok source chats --source macos --json
 katok sync --source macos --json
 katok sync --source macos --incremental --json
+katok sync --source macos --chat <chat-id> --incremental --json
 katok sync --json
 katok index --json
 katok search keyword "보고서" --json

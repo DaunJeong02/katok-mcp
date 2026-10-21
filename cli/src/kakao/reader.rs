@@ -428,6 +428,7 @@ fn read_one(
     account: &str,
     users: &HashMap<i64, String>,
     after_rowid: Option<i64>,
+    only_chats: Option<&[i64]>,
 ) -> Result<(HashMap<String, ChatRecord>, Vec<RawMessage>)> {
     let rooms = load_rooms(conn)?;
     // Resolve each room's display name once (peer/member joins need `users`),
@@ -443,20 +444,26 @@ fn read_one(
         .collect();
 
     // `rowid > -1` is every row: one statement either way, and the rowid range is the table's
-    // own key, so an incremental read touches only the new rows.
+    // own key, so an incremental read touches only the new rows. A chat filter goes into the
+    // statement too, so other rooms' bodies are never read into memory.
+    let chat_filter = only_chats
+        .map(|ids| format!(" AND chatId IN ({})", vec!["?"; ids.len()].join(",")))
+        .unwrap_or_default();
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT chatId, logId, authorId, type, message, sentAt, supplement, attachment
              FROM NTChatMessage
-             WHERE rowid > ?1 AND message IS NOT NULL AND message <> ''",
-        )
+             WHERE rowid > ?{chat_filter} AND message IS NOT NULL AND message <> ''"
+        ))
         .map_err(Error::Sql)?;
+    let mut bound = vec![after_rowid.unwrap_or(-1)];
+    bound.extend(only_chats.unwrap_or_default());
 
     let mut messages = Vec::new();
     let mut chats: HashMap<String, ChatRecord> = HashMap::new();
 
     let rows = stmt
-        .query_map([after_rowid.unwrap_or(-1)], |row| {
+        .query_map(rusqlite::params_from_iter(bound), |row| {
             let chat_id: i64 = row.get(0)?;
             let log_id: i64 = row.get(1)?;
             let author_id: i64 = row.get(2)?;
@@ -645,6 +652,19 @@ pub fn read_databases_with_key(
     key: &DatabaseKey,
     cursors: &[SourceCursor],
 ) -> Result<ReaderOutput> {
+    read_databases_for_chats(database_files, user_id, key, cursors, None)
+}
+
+/// [`read_databases_with_key`] that reads only the messages of `only_chats` when given. The
+/// cursors it returns are still the newest rows of the whole table, whichever chat they belong
+/// to, so they mark where this snapshot ends rather than where a filtered chat ends.
+pub fn read_databases_for_chats(
+    database_files: &[PathBuf],
+    user_id: i64,
+    key: &DatabaseKey,
+    cursors: &[SourceCursor],
+    only_chats: Option<&[i64]>,
+) -> Result<ReaderOutput> {
     let account = account_hash(user_id);
 
     // Open each DB once. A DB that fails to open is skipped with a one-line
@@ -697,7 +717,7 @@ pub fn read_databases_with_key(
         // A read_one failure on one DB (e.g. a schema mismatch in a secondary
         // store) must not abort messages already gathered from a healthy DB:
         // log a one-line warning (filename only) and skip this DB.
-        let read = read_one(conn, user_id, &account, &users, after);
+        let read = read_one(conn, user_id, &account, &users, after, only_chats);
         drop(snapshot);
         let (db_chats, db_messages) = match read {
             Ok(result) => result,

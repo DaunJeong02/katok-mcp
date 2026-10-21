@@ -54,6 +54,23 @@ pub fn read_kakao_since(options: &AuthOptions, cursors: &[SourceCursor]) -> Resu
     )
 }
 
+/// [`read_kakao_since`] that reads only the messages of `chat_ids`
+/// (see [`reader::read_databases_for_chats`]).
+pub fn read_kakao_since_for_chats(
+    options: &AuthOptions,
+    cursors: &[SourceCursor],
+    chat_ids: &[i64],
+) -> Result<ReaderOutput> {
+    let resolved = auth::resolve_auth(options)?;
+    reader::read_databases_for_chats(
+        &resolved.database_files,
+        resolved.user_id,
+        &resolved.key,
+        cursors,
+        Some(chat_ids),
+    )
+}
+
 /// Resolve the default home directory, mirroring `crate::paths`.
 pub fn default_home() -> Result<PathBuf> {
     dirs::home_dir().ok_or(Error::HomeDirUnavailable)
