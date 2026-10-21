@@ -1,0 +1,11 @@
+# katok sync --chat <id> --incremental --json
+chunks
+incremental
+inserted_messages
+rebuilt_chats
+timings_ms
+timings_ms.read_source
+timings_ms.rebuild_chunks
+timings_ms.upsert_messages
+total_messages
+updated_messages

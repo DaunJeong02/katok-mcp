@@ -1,0 +1,10 @@
+# katok rooms --json
+[].chat_id
+[].chat_name
+[].chat_type
+[].last_message_id
+[].last_seen_log_id
+[].last_timestamp
+[].message_count
+[].my_watermark_log_id
+[].new_message_count

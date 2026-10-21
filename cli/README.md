@@ -374,7 +374,7 @@ katok doctor --macos-probe --json
 
 ## 앱에 사이드카로 넣을 때
 
-`katok`을 다른 앱이 번들해 부를 때 쓰는 출력입니다. `--json` 출력은 필드를 더하기만 하고 기존 필드를 지우거나 뜻을 바꾸지 않습니다. 방 단위 sync는 `sync --chat`, 방 삭제는 `forget`(위 설명)을 씁니다.
+`katok`을 다른 앱이 번들해 부를 때 쓰는 출력입니다. `--json` 출력은 필드를 더하기만 하고 기존 필드를 지우거나 뜻을 바꾸지 않습니다. `tests/fixtures/json-keys/`의 골든 파일이 Enter Message가 의존하는 키 계약이고, `tests/json_contract.rs`가 키가 빠지면 실패합니다(새 키는 `UPDATE_GOLDEN=1 cargo test --test json_contract`로 골든을 갱신해 함께 커밋합니다). 방 단위 sync는 `sync --chat`, 방 삭제는 `forget`(위 설명)을 씁니다.
 
 `katok messages --chat <chat-id> --json`의 각 메시지에는 멘션 두 필드가 붙습니다.
 

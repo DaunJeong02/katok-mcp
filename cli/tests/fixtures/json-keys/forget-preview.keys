@@ -1,0 +1,17 @@
+# katok forget --chat <id> --json
+chats
+chats[].chat_id
+chats[].chats
+chats[].chunk_messages
+chats[].chunk_parent_refs
+chats[].chunks
+chats[].chunks_fts
+chats[].media_files
+chats[].messages
+chats[].parent_chunk_children
+chats[].parent_chunks
+chats[].reply_edges
+chats[].transcripts
+deleted
+next_step
+semantic_rebuild_required

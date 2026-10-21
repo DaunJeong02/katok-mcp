@@ -1,0 +1,6 @@
+# katok <any command> --json, on failure
+error
+error.cause
+error.code
+error.message
+ok

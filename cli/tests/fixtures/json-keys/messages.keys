@@ -1,0 +1,21 @@
+# katok messages --chat <id> --json
+chat_id
+count
+limit
+messages
+messages[].chat_id
+messages[].chat_name
+messages[].chat_type
+messages[].is_feed
+messages[].is_mine
+messages[].mentioned_user_ids
+messages[].mentions_all
+messages[].message_id
+messages[].message_type
+messages[].reply_to_message_id
+messages[].sender_id
+messages[].sender_nickname
+messages[].text
+messages[].timestamp
+since
+until
