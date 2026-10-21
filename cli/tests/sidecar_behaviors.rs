@@ -944,3 +944,135 @@ fn a_forgotten_room_comes_back_whole_on_the_next_unfiltered_sync() {
     assert_eq!(report["incremental"], Value::Bool(false));
     assert_eq!(install.archived(GROUP_B), 3);
 }
+
+/// Between room B's second and third synthetic row: `--since` keeps rows 1002 and 1003.
+const SINCE_MS: &str = "1700001002000";
+
+impl Install {
+    fn b_logs(&self) -> Vec<i64> {
+        let conn = self.archive();
+        let mut stmt = conn
+            .prepare("SELECT message_id FROM messages WHERE chat_id = '200'")
+            .unwrap();
+        let mut logs: Vec<i64> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|id| id.unwrap()[4..].parse().unwrap())
+            .collect();
+        logs.sort_unstable();
+        logs
+    }
+}
+
+#[test]
+fn since_trims_a_new_room_and_every_later_read_of_it() {
+    let install = install();
+    let both = |extra: &[&str]| {
+        let mut args = vec![
+            "sync", "--source", "macos", "--chat", "100", "--chat", "200", "--json",
+        ];
+        args.extend_from_slice(extra);
+        install.json(&args)
+    };
+    install.json(&["sync", "--source", "macos", "--chat", "100", "--json"]);
+    both(&["--since", SINCE_MS, "--incremental"]);
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "the new room starts at --since"
+    );
+    assert_eq!(
+        install.archived(GROUP_A),
+        3,
+        "a room already archived ignores --since"
+    );
+
+    // Sent before the floor, written to the database only now: past the cursor, and the
+    // older rows sit inside the reader's re-read margin.
+    install.insert(GROUP_B, 500, PEER, None);
+    install.insert(GROUP_A, 501, PEER, None);
+    let next = both(&["--incremental"]);
+    assert_eq!(next["incremental"], Value::Bool(true));
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "no older row comes back incrementally"
+    );
+    assert!(
+        install.has_message(GROUP_A, 501),
+        "a room without a floor takes it"
+    );
+
+    both(&[]);
+    install.json(&["sync", "--source", "macos", "--json"]);
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "nor in a full or unfiltered read"
+    );
+
+    both(&["--since", "0"]);
+    assert_eq!(
+        install.b_logs(),
+        [1002, 1003],
+        "a later --since does not widen it"
+    );
+
+    install.json(&["forget", "--chat", "200", "--yes", "--json"]);
+    both(&["--incremental"]);
+    assert_eq!(
+        install.b_logs(),
+        [500, 1001, 1002, 1003],
+        "forgotten and synced again without --since, the room comes back whole"
+    );
+}
+
+#[test]
+fn a_new_room_with_nothing_after_since_stays_trimmed() {
+    let install = install();
+    let b = |extra: &[&str]| {
+        let mut args = vec!["sync", "--source", "macos", "--chat", "200", "--json"];
+        args.extend_from_slice(extra);
+        install.json(&args)
+    };
+    b(&["--since", "1800000000000"]);
+    assert_eq!(install.archived(GROUP_B), 0);
+    b(&[]);
+    assert_eq!(
+        install.archived(GROUP_B),
+        0,
+        "the floor holds without a message"
+    );
+    b(&["--since", "0"]);
+    assert_eq!(
+        install.archived(GROUP_B),
+        0,
+        "a room with a floor is in the archive: a later --since leaves the floor alone"
+    );
+    install.insert(GROUP_B, 2_000, PEER, None);
+    install
+        .source()
+        .execute(
+            "UPDATE NTChatMessage SET sentAt = 1800000000 WHERE logId = 2000",
+            [],
+        )
+        .unwrap();
+    b(&["--incremental"]);
+    assert_eq!(install.b_logs(), [2000]);
+}
+
+#[test]
+fn since_is_refused_without_a_chat_or_below_zero() {
+    let install = install();
+    for args in [
+        &["sync", "--source", "macos", "--since", SINCE_MS][..],
+        &[
+            "sync", "--source", "macos", "--chat", "200", "--since", "-1",
+        ],
+        &[
+            "sync", "--source", "macos", "--chat", "200", "--since", "soon",
+        ],
+    ] {
+        install.command(args).assert().failure();
+    }
+}

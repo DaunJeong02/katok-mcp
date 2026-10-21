@@ -36,6 +36,15 @@
   errno. Without the flag it is `not_checked`: opening the container is what raises the macOS
   prompt, and a plain `doctor` stays prompt-free.
 
+### Sync range
+
+- `katok sync --chat <chat_id> --since <unix_ms>` stores a chat the archive does not hold yet
+  (no message, no floor) only from that send time on. The time is kept as the chat's floor in a
+  new `chat_floors` table and every later sync drops rows before it, whatever the read path:
+  cursors keep advancing to the newest row, and the re-read margin, replaced rows and late
+  arrivals cannot bring older rows back. A chat already in the archive ignores `--since`;
+  `forget` removes the floor, so changing a range is forget then sync with the new `--since`.
+
 ### Forget
 
 - `katok forget --chat <chat_id> [--yes]` deletes one chat's rows from every archive table

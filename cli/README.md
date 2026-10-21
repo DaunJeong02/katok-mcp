@@ -256,6 +256,8 @@ sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가
 
 `katok sync --source macos --chat <chat_id> --json`은 지정한 방만 읽어 아카이브에 넣습니다. `--chat`은 여러 번 줄 수 있습니다. 다른 방의 행은 카카오톡 DB 쿼리 단계에서 걸러지므로 본문을 메모리로 읽지도 않고, 아카이브의 `chats`에도 들어가지 않습니다. macOS 소스의 chat_id는 숫자여야 하고, 빈 값은 거부합니다(빈 값을 버리면 모든 방을 읽는 sync가 되기 때문입니다). `--prune-preview`/`--prune-deleted`와 함께 쓸 수 없습니다.
 
+`katok sync --source macos --chat <chat_id> --since <unix_ms> --json`은 아카이브에 아직 없는 방을 그 시각 이후부터만 넣습니다. 시각은 보낸 시각(`sentAt`)과 밀리초 단위로 비교합니다. `--chat` 없이는 쓸 수 없습니다. "아직 없는 방"은 메시지 행도 바닥도 없는 방입니다. 그런 방에 `--since`가 그 방의 바닥(`chat_floors`)으로 저장되고, 이후 모든 sync가 증분·전체·무필터를 가리지 않고 바닥 이전 행을 버립니다. 그래서 커서는 평소처럼 테이블의 최신 행까지 전진하고, 커서 앞 재읽기 구간이나 교체된 행, 늦게 받은 옛 메시지로도 옛 행이 들어오지 않습니다. 이미 메시지나 바닥이 있는 방은 `--since`를 무시합니다. 범위를 바꾸려면(예: "지금부터" → "30일") 그 방을 `forget --yes`로 지운 뒤 새 `--since`로 다시 sync합니다. `forget`은 바닥도 지우므로 `--since` 없이 다시 넣으면 전체 기록이 들어옵니다.
+
 커서 설계: 증분 커서는 방과 무관하게 DB 테이블 전체의 가장 최근 행 8개입니다. 필터 sync가 이 커서를 무필터 커서 자리에 저장하면, 건너뛴 방의 새 행이 커서 앞에 남아 다음 무필터 `--incremental`이 그 행을 영영 읽지 않습니다. 그래서 필터 sync는 무필터 커서를 읽지도 쓰지도 않고, 방 집합(정렬·중복 제거한 chat_id의 해시)마다 별도 커서를 씁니다. 같은 집합으로 다시 실행하면 순서·중복과 무관하게 증분으로 읽고, 집합이 바뀌면(방 추가·제거) 첫 실행은 그 방들을 전체로 읽습니다. 새로 추가한 방의 과거 기록도 그때 들어옵니다. 집합마다 남는 커서는 DB 파일당 8행이라 지우지 않습니다. 단 `forget --yes`는 무필터·필터 커서를 전부 지웁니다. 커서는 어느 방을 지나갔는지 기록하지 않아서, 지운 방이 든 커서만 골라낼 수 없고 남겨 두면 그 방을 다시 sync할 때 커서 앞의 과거 기록이 빠지기 때문입니다. 대가는 다음 `--incremental` sync 한 번이 전체를 읽는 것입니다.
 
 요구사항:
@@ -317,6 +319,7 @@ katok source chats --source macos --json
 katok sync --source macos --json
 katok sync --source macos --incremental --json
 katok sync --source macos --chat <chat-id> --incremental --json
+katok sync --source macos --chat <chat-id> --since <unix-ms> --json
 katok sync --json
 katok index --json
 katok search keyword "보고서" --json

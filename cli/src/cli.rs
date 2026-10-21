@@ -105,6 +105,14 @@ pub(crate) enum Commands {
             conflicts_with_all = ["prune_preview", "prune_deleted"]
         )]
         chats: Vec<String>,
+        /// Store a room the archive does not hold yet only from this time on (unix
+        /// milliseconds, compared with the send time). Needs `--chat`.
+        ///
+        /// The time becomes that room's floor and applies to every later sync, so older rows
+        /// never arrive by any read path. A room already in the archive keeps what it has: to
+        /// change its range, `forget` it and sync it again with another `--since`.
+        #[arg(long, value_name = "UNIX_MS", requires = "chats", value_parser = clap::value_parser!(i64).range(0..))]
+        since: Option<i64>,
     },
     Index {
         /// Rebuild every vector instead of reusing unchanged vectors from the committed generation.

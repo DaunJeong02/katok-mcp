@@ -266,6 +266,44 @@ impl Archive {
         Ok(())
     }
 
+    /// Give each of `chat_ids` the floor `since_ms` if the archive holds nothing of it yet: no
+    /// message and no floor. A room already in the archive keeps what it has, so a later
+    /// `--since` neither trims nor widens it. Returns the chats that got the floor.
+    pub fn register_chat_floors(&self, chat_ids: &[String], since_ms: i64) -> Result<Vec<String>> {
+        let mut registered = Vec::new();
+        for chat_id in chat_ids {
+            let inserted = self
+                .conn
+                .prepare_cached(
+                    "INSERT INTO chat_floors(chat_id, since_ms)
+                     SELECT ?1, ?2
+                     WHERE NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM chat_floors WHERE chat_id = ?1)",
+                )
+                .map_err(Error::Sql)?
+                .execute(params![chat_id, since_ms])
+                .map_err(Error::Sql)?;
+            if inserted == 1 {
+                registered.push(chat_id.clone());
+            }
+        }
+        Ok(registered)
+    }
+
+    /// Every room's floor, as unix milliseconds. Sync drops a message sent before its room's
+    /// floor whichever way it was read: in full, past a cursor, or as a replaced row.
+    pub fn chat_floors(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT chat_id, since_ms FROM chat_floors")
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(Error::Sql)?;
+        rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+            .map_err(Error::Sql)
+    }
+
     /// Drop the chunk artifacts of `chat_id` whose start is at or after `from_started_at`.
     ///
     /// `None` drops the whole chat. A non-null floor drops only the tail: because the recompute
