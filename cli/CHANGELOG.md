@@ -26,6 +26,10 @@
   what the owner has read is not settled, so all three are reported; log ids are decimal
   strings, missing values `null`. Every macOS sync, incremental or not, re-reads them for all
   rooms it covers and stores them on existing `chats` rows only.
+- `katok rooms --json` adds `member_count` (`activeMembersCount`, owner included),
+  `member_user_ids` (the `displayMemberIds` preview without the owner, as decimal strings; a
+  direct chat without a preview gives its peer) and `is_open_chat` (`linkId != 0`), stored and
+  refreshed the same way. `ChatReadState` is renamed `ChatRoomState` to carry them.
 
 ### Doctor
 

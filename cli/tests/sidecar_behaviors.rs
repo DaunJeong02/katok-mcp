@@ -1076,3 +1076,57 @@ fn since_is_refused_without_a_chat_or_below_zero() {
         install.command(args).assert().failure();
     }
 }
+
+#[test]
+fn rooms_report_members_and_whether_a_room_is_an_open_chat() {
+    let install = install();
+    let source = install.source();
+    source
+        .execute(
+            "UPDATE NTChatRoom SET displayMemberIds = ?1 WHERE chatId = 100",
+            [bplist_ints(&[PEER, TEST_USER_ID, BIG_LOG_ID])],
+        )
+        .unwrap();
+    source
+        .execute_batch(
+            "UPDATE NTChatRoom SET linkId = 77, activeMembersCount = 40 WHERE chatId = 200;
+             INSERT INTO NTChatRoom(chatId, linkId, type, activeMembersCount,
+                                    directChatMemberUserId)
+                 VALUES (300, 0, 0, 2, 500);",
+        )
+        .unwrap();
+    drop(source);
+    install.insert(300, 1, PEER, None);
+    install.json(&["sync", "--source", "macos", "--json"]);
+
+    let a = install.room(GROUP_A);
+    assert_eq!(a["member_count"], 3);
+    assert_eq!(
+        a["member_user_ids"],
+        serde_json::json!([PEER.to_string(), BIG_LOG_ID.to_string()]),
+        "the previewed members without the owner, every digit kept"
+    );
+    assert_eq!(a["is_open_chat"], false);
+    let b = install.room(GROUP_B);
+    assert_eq!(b["member_count"], 40);
+    assert_eq!(b["member_user_ids"], serde_json::json!([]));
+    assert_eq!(b["is_open_chat"], true);
+    let direct = install.room(300);
+    assert_eq!(direct["member_count"], 2);
+    assert_eq!(
+        direct["member_user_ids"],
+        serde_json::json!([PEER.to_string()]),
+        "a direct chat without a preview names its peer"
+    );
+
+    // Someone joins without a message: the next incremental sync still picks it up.
+    install
+        .source()
+        .execute(
+            "UPDATE NTChatRoom SET activeMembersCount = 4 WHERE chatId = 100",
+            [],
+        )
+        .unwrap();
+    install.json(&["sync", "--source", "macos", "--incremental", "--json"]);
+    assert_eq!(install.room(GROUP_A)["member_count"], 4);
+}

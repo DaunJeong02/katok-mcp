@@ -561,8 +561,8 @@ fn run_sync(
             .collect();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
         archive
-            .record_read_states(&read.read_states)
-            .context("record read states")?;
+            .record_room_states(&read.room_states)
+            .context("record room states")?;
         archive
             .record_source_cursors(&cursor_source, &read.cursors)
             .context("record source cursors")?;

@@ -394,6 +394,12 @@ katok doctor --macos-probe --json
 
 log id는 `mentioned_user_ids`와 같은 이유로 10진 문자열이고, `new_message_count`는 숫자입니다. 원본에 열이 없거나 값을 읽지 못하면 `null`입니다. 값은 macOS sync가 아카이브의 `chats`에 저장한 것이고 `rooms`는 원본을 직접 읽지 않습니다. sync는 증분이든 아니든 매번 모든 방(`--chat`이면 그 방들)의 읽음 위치를 다시 읽으므로, 새 메시지 없이 카카오톡에서 방을 읽기만 해도 다음 sync에 반영됩니다. 아카이브에 없는 방은 읽음 위치만으로 추가되지 않습니다.
 
+같은 `rooms --json`에는 방 구성 세 필드도 붙습니다. 읽음 위치와 같은 방식으로 매 macOS sync가 다시 읽어 저장하고, 원본에 열이 없거나 값을 읽지 못하면 `null`입니다.
+
+- `member_count`: `NTChatRoom.activeMembersCount`, 나를 포함한 방 인원입니다. `displayMemberIds`는 카카오톡이 미리보기로 보여 주는 몇 명뿐이라 인원수로 쓰지 않습니다.
+- `member_user_ids`: `displayMemberIds`의 user_id에서 나를 뺀 10진 문자열 배열입니다. 전체 멤버 목록이 아니라 미리보기 목록입니다. 미리보기가 없는 1:1 방은 `directChatMemberUserId`(상대)를 씁니다.
+- `is_open_chat`: `linkId`가 0이 아니면 `true`입니다.
+
 연결 상태는 `katok doctor --json`의 `kakao_app`과 `semantic_rebuild_required`, 권한 상태는 `katok doctor --macos-probe --json`의 `source_access`로 봅니다(위 설치 절). `source_access`를 기본 `doctor`에 넣지 않은 이유는 기본 `doctor`가 권한 프롬프트를 띄우지 않는다는 약속 때문입니다. 이 약속에 기대어 `doctor --json`을 자동으로 부르는 호출자(예: semantic search 전마다 doctor를 확인하는 MCP 서버)가 있습니다.
 
 ## 개인정보와 로컬 파일

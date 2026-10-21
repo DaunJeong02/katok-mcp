@@ -221,7 +221,9 @@ pub(crate) enum Commands {
     /// `chat_type` is `direct`, `group`, or `self` (the memo chat whose only member is you,
     /// named after your own nickname as KakaoTalk titles its window). `last_seen_log_id`,
     /// `new_message_count` and `my_watermark_log_id` are the read position KakaoTalk keeps for
-    /// the room, as of the last macOS sync; `null` when KakaoTalk has none.
+    /// the room, as of the last macOS sync; `null` when KakaoTalk has none. `member_count`
+    /// (owner included), `member_user_ids` (a preview, not the full list) and `is_open_chat`
+    /// come from the same sync.
     Rooms {
         #[arg(long)]
         json: bool,

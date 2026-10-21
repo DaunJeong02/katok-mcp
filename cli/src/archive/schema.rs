@@ -167,6 +167,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     ] {
         add_column_if_missing(conn, "chats", column, "INTEGER")?;
     }
+    add_column_if_missing(conn, "chats", "member_count", "INTEGER")?;
+    add_column_if_missing(conn, "chats", "member_user_ids", "TEXT")?;
+    add_column_if_missing(conn, "chats", "is_open_chat", "INTEGER")?;
     Ok(())
 }
 

@@ -2,9 +2,12 @@
 [].chat_id
 [].chat_name
 [].chat_type
+[].is_open_chat
 [].last_message_id
 [].last_seen_log_id
 [].last_timestamp
+[].member_count
+[].member_user_ids
 [].message_count
 [].my_watermark_log_id
 [].new_message_count

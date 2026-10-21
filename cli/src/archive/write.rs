@@ -1,7 +1,7 @@
 use super::model::DeletedMessage;
 use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
-    types::{ChatReadState, RawMessage, SourceCursor, SyncReport, TouchedChat},
+    types::{ChatRoomState, RawMessage, SourceCursor, SyncReport, TouchedChat},
     Error, Result,
 };
 use chrono::{DateTime, Utc};
@@ -240,26 +240,37 @@ impl Archive {
         })
     }
 
-    /// Store each room's read position on its `chats` row. A room the archive has no row for
-    /// is skipped, so a read position never adds a room to the archive.
-    pub fn record_read_states(&self, states: &[ChatReadState]) -> Result<()> {
+    /// Store each room's [`ChatRoomState`] on its `chats` row. A room the archive has no row
+    /// for is skipped, so a room's state never adds it to the archive.
+    pub fn record_room_states(&self, states: &[ChatRoomState]) -> Result<()> {
         let mut stmt = self
             .conn
             .prepare_cached(
                 "UPDATE chats
-                 SET last_seen_log_id = ?2, new_message_count = ?3, my_watermark_log_id = ?4
+                 SET last_seen_log_id = ?2, new_message_count = ?3, my_watermark_log_id = ?4,
+                     member_count = ?5, member_user_ids = ?6, is_open_chat = ?7
                  WHERE chat_id = ?1
                    AND (last_seen_log_id IS NOT ?2
                         OR new_message_count IS NOT ?3
-                        OR my_watermark_log_id IS NOT ?4)",
+                        OR my_watermark_log_id IS NOT ?4
+                        OR member_count IS NOT ?5
+                        OR member_user_ids IS NOT ?6
+                        OR is_open_chat IS NOT ?7)",
             )
             .map_err(Error::Sql)?;
         for state in states {
+            let members = state.member_user_ids.as_ref().map(|ids| {
+                let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
+                serde_json::Value::from(ids).to_string()
+            });
             stmt.execute(params![
                 state.chat_id,
                 state.last_seen_log_id,
                 state.new_message_count,
-                state.my_watermark_log_id
+                state.my_watermark_log_id,
+                state.member_count,
+                members,
+                state.is_open_chat
             ])
             .map_err(Error::Sql)?;
         }
