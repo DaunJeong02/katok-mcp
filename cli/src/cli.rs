@@ -210,7 +210,8 @@ pub(crate) enum Commands {
         /// Maximum rows, taken from the newest end of the range.
         #[arg(long, default_value_t = 500, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
-        /// Force which sender_id counts as "me" (synthetic fixtures carry no account hash).
+        /// Force which user id counts as "me" for is_mine and mentions_me (synthetic fixtures
+        /// carry no account hash).
         #[arg(long)]
         me: Option<String>,
         #[arg(long)]

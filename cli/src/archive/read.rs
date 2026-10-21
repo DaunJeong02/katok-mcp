@@ -317,7 +317,8 @@ impl Archive {
     /// Messages of one chat inside `[since, until]`, newest `limit` rows, returned oldest first.
     ///
     /// Added on the talk2build branch for the mirror viewer and the poll cursor. `me_override`
-    /// forces the `is_mine` sender id (synthetic fixtures do not carry a sha256 account hash).
+    /// forces the user id that counts as the account owner for `is_mine` and `mentions_me`
+    /// (synthetic fixtures do not carry a sha256 account hash).
     pub fn messages_for_chat_range(
         &self,
         chat_id: &str,
@@ -346,15 +347,13 @@ impl Archive {
                 let sender_id: String = row.get(5)?;
                 let message_type: String = row.get(9)?;
                 let text: String = row.get(8)?;
-                let is_mine = match me_override {
-                    Some(me) => me == sender_id,
-                    None => sender_account_hash(&sender_id) == account_hash,
-                };
+                let is_mine = is_me(&sender_id, &account_hash, me_override);
                 let is_feed = crate::transcript::is_feed(&message_type, &text);
-                let mentioned_user_ids = row
+                let mentioned_user_ids: Vec<String> = row
                     .get::<_, Option<String>>(11)?
                     .and_then(|raw| serde_json::from_str(&raw).ok())
                     .unwrap_or_default();
+                let mentions_me = mentions_me(&mentioned_user_ids, &account_hash, me_override);
                 Ok(MessageRow {
                     message_id: row.get(4)?,
                     chat_id: row.get(1)?,
@@ -370,6 +369,7 @@ impl Archive {
                     is_feed,
                     mentioned_user_ids,
                     mentions_all: row.get(12)?,
+                    mentions_me,
                 })
             })
             .map_err(Error::Sql)?
@@ -451,6 +451,28 @@ impl Archive {
     }
 }
 
+/// Whether `user_id` is the account owner: equal to `me_override` when one is given, otherwise
+/// hashing to the archive's `account_hash`. `is_mine` and `mentions_me` both go through here so
+/// the two cannot disagree on who "me" is.
+fn is_me(user_id: &str, account_hash: &str, me_override: Option<&str>) -> bool {
+    match me_override {
+        Some(me) => me == user_id,
+        None => sender_account_hash(user_id) == account_hash,
+    }
+}
+
+/// Whether any of `mentioned_user_ids` is the account owner, by [`is_me`]. A room-wide mention
+/// (`mentions_all`) is not counted: it is reported on its own.
+fn mentions_me(
+    mentioned_user_ids: &[String],
+    account_hash: &str,
+    me_override: Option<&str>,
+) -> bool {
+    mentioned_user_ids
+        .iter()
+        .any(|id| is_me(id, account_hash, me_override))
+}
+
 /// Mirrors `kakao::reader::account_hash`: lowercase hex sha256 of the decimal sender id.
 fn sender_account_hash(sender_id: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -460,4 +482,54 @@ fn sender_account_hash(sender_id: &str) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: &str = "1000000001";
+    const OTHER: &str = "600";
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn mentions_me_when_my_id_hashes_to_the_account_hash() {
+        let account_hash = sender_account_hash(ME);
+        assert!(mentions_me(&ids(&[OTHER, ME]), &account_hash, None));
+    }
+
+    #[test]
+    fn does_not_mention_me_when_only_others_are_mentioned() {
+        let account_hash = sender_account_hash(ME);
+        assert!(!mentions_me(&ids(&[OTHER]), &account_hash, None));
+    }
+
+    #[test]
+    fn does_not_mention_me_without_any_mention() {
+        let account_hash = sender_account_hash(ME);
+        assert!(!mentions_me(&[], &account_hash, None));
+    }
+
+    #[test]
+    fn me_override_decides_who_is_mentioned_instead_of_the_account_hash() {
+        let account_hash = "acct-synthetic";
+        assert!(mentions_me(&ids(&[OTHER, "u2"]), account_hash, Some("u2")));
+        assert!(!mentions_me(&ids(&[OTHER]), account_hash, Some("u2")));
+        let hashed = sender_account_hash(ME);
+        assert!(
+            !mentions_me(&ids(&[ME]), &hashed, Some("u2")),
+            "with an override the account hash is not consulted"
+        );
+    }
+
+    #[test]
+    fn is_mine_and_mentions_me_share_one_rule() {
+        let account_hash = sender_account_hash(ME);
+        assert!(is_me(ME, &account_hash, None));
+        assert!(!is_me(OTHER, &account_hash, None));
+        assert!(is_me(OTHER, &account_hash, Some(OTHER)));
+    }
 }

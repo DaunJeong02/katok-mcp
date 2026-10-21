@@ -402,9 +402,15 @@ fn messages_report_who_each_message_mentions() {
             r#"{{"src_logId":10,"src_mentions":[{{"user_id":{TEST_USER_ID}}}]}}"#
         )),
     );
+    install.insert(
+        GROUP_A,
+        13,
+        PEER,
+        Some(r#"{"mentions":[{"user_id":600,"at":[1],"len":4}]}"#),
+    );
     install.json(&["sync", "--source", "macos", "--json"]);
     let listed = install.json(&["messages", "--chat", "100", "--json"]);
-    let by_id = |id: &str| -> Value {
+    let find = |listed: &Value, id: &str| -> Value {
         listed["messages"]
             .as_array()
             .unwrap()
@@ -413,6 +419,7 @@ fn messages_report_who_each_message_mentions() {
             .cloned()
             .unwrap_or_else(|| panic!("{id} missing"))
     };
+    let by_id = |id: &str| find(&listed, id);
     assert_eq!(
         by_id("100-10")["mentioned_user_ids"],
         serde_json::json!([me, "600"])
@@ -427,6 +434,29 @@ fn messages_report_who_each_message_mentions() {
     );
     assert_eq!(by_id("100-1")["mentioned_user_ids"], serde_json::json!([]));
     assert_eq!(by_id("100-1")["mentions_all"], false);
+
+    assert_eq!(
+        by_id("100-10")["mentions_me"],
+        true,
+        "the owner is among them"
+    );
+    assert_eq!(by_id("100-13")["mentions_me"], false, "only someone else");
+    assert_eq!(
+        by_id("100-11")["mentions_me"],
+        false,
+        "a room-wide mention stays in mentions_all"
+    );
+    assert_eq!(
+        by_id("100-12")["mentions_me"],
+        false,
+        "a quoted mention is not this message's"
+    );
+    assert_eq!(by_id("100-1")["mentions_me"], false, "no mention at all");
+
+    let as_peer = install.json(&["messages", "--chat", "100", "--me", "600", "--json"]);
+    assert_eq!(find(&as_peer, "100-13")["mentions_me"], true);
+    assert_eq!(find(&as_peer, "100-10")["mentions_me"], true);
+    assert_eq!(find(&as_peer, "100-12")["mentions_me"], false);
 }
 
 #[test]
