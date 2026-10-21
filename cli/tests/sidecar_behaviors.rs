@@ -954,11 +954,18 @@ fn rooms_report_members_and_whether_a_room_is_an_open_chat() {
             "UPDATE NTChatRoom SET linkId = 77, activeMembersCount = 40 WHERE chatId = 200;
              INSERT INTO NTChatRoom(chatId, linkId, type, activeMembersCount,
                                     directChatMemberUserId)
-                 VALUES (300, 0, 0, 2, 500);",
+                 VALUES (300, 0, 0, 2, 500), (400, 0, 5, 1, 0);",
+        )
+        .unwrap();
+    source
+        .execute(
+            "UPDATE NTChatRoom SET displayMemberIds = ?1 WHERE chatId = 400",
+            [bplist_ints(&[TEST_USER_ID])],
         )
         .unwrap();
     drop(source);
     install.insert(300, 1, PEER, None);
+    install.insert(400, 1, TEST_USER_ID, None);
     install.json(&["sync", "--source", "macos", "--json"]);
 
     let a = install.room(GROUP_A);
@@ -979,6 +986,14 @@ fn rooms_report_members_and_whether_a_room_is_an_open_chat() {
         direct["member_user_ids"],
         serde_json::json!([PEER.to_string()]),
         "a direct chat without a preview names its peer"
+    );
+    let own = install.room(400);
+    assert_eq!(own["chat_type"], "self");
+    assert_eq!(own["member_count"], 1);
+    assert_eq!(
+        own["member_user_ids"],
+        serde_json::json!([]),
+        "the self chat lists no one: its only member is the owner"
     );
 
     // Someone joins without a message: the next incremental sync still picks it up.
