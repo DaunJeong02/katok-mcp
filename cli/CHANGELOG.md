@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### CLI
+
+- `katok --version` (and `-V`) prints `katok <version>` from `Cargo.toml` and exits 0.
+
 ### Sync
 
 - `katok sync --chat <chat_id>` (repeatable) reads and archives only the named chats. The

@@ -314,6 +314,7 @@ katok send --chat <chat-id> --text "검토할 초안" --draft --accept-use-polic
 ## CLI 명령 요약
 
 ```bash
+katok --version
 katok doctor --json
 katok source chats --source macos --json
 katok sync --source macos --json

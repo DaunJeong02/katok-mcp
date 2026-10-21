@@ -36,7 +36,7 @@ pub(crate) fn conflict_message(error: &clap::Error) -> Option<String> {
 }
 
 #[derive(Parser)]
-#[command(name = "katok", about = "katok: local KakaoTalk search CLI")]
+#[command(name = "katok", about = "katok: local KakaoTalk search CLI", version)]
 pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) data_dir: Option<PathBuf>,

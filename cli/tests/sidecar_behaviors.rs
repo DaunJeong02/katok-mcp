@@ -992,3 +992,21 @@ fn rooms_report_members_and_whether_a_room_is_an_open_chat() {
     install.json(&["sync", "--source", "macos", "--incremental", "--json"]);
     assert_eq!(install.room(GROUP_A)["member_count"], 4);
 }
+
+#[test]
+fn version_prints_the_crate_version_and_exits_zero() {
+    for flag in ["--version", "-V"] {
+        let out = assert_cmd::Command::cargo_bin("katok")
+            .expect("katok binary")
+            .arg(flag)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("katok {}\n", env!("CARGO_PKG_VERSION")),
+            "{flag}"
+        );
+    }
+}
