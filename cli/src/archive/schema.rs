@@ -152,7 +152,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         "messages",
         "mentions_all",
         "INTEGER NOT NULL DEFAULT 0",
-    )
+    )?;
+    for column in [
+        "last_seen_log_id",
+        "new_message_count",
+        "my_watermark_log_id",
+    ] {
+        add_column_if_missing(conn, "chats", column, "INTEGER")?;
+    }
+    Ok(())
 }
 
 fn add_column_if_missing(

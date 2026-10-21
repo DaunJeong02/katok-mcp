@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::auth::DatabaseKey;
 use super::bplist;
-use crate::types::{RawMessage, SourceCursor};
+use crate::types::{ChatReadState, RawMessage, SourceCursor};
 use crate::{Error, Result};
 
 /// Output of reading one or more KakaoTalk databases.
@@ -24,7 +24,13 @@ pub struct ReaderOutput {
     pub cursors: Vec<SourceCursor>,
     /// Every database was read from a cursor, not in full.
     pub incremental: bool,
+    /// Each room's read position, read in full on every read, incremental or not: reading a
+    /// room in KakaoTalk moves it without adding a message.
+    pub read_states: Vec<ChatReadState>,
 }
+
+/// More members than any KakaoTalk room holds; a watermark array past it is corrupt.
+const WATERMARK_MAX_ENTRIES: usize = 16_384;
 
 /// Rows before a cursor that an incremental read takes again. A valid cursor already covers
 /// every insert (a new row always gets a rowid above the newest existing one), so this is only
@@ -263,6 +269,69 @@ fn enrich_display_members(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>)
             }
         }
     }
+}
+
+/// Best-effort read of every room's [`ChatReadState`], limited to `only_chats` when given. A
+/// column this install lacks reads as NULL rather than failing the query, and any read error
+/// leaves the rooms without a read position; it never aborts the read.
+fn load_read_states(
+    conn: &Connection,
+    user_id: i64,
+    only_chats: Option<&[i64]>,
+) -> Vec<ChatReadState> {
+    let Ok(mut columns) = conn.prepare("SELECT name FROM pragma_table_info('NTChatRoom')") else {
+        return Vec::new();
+    };
+    let present: Vec<String> = match columns.query_map([], |row| row.get(0)) {
+        Ok(rows) => rows.flatten().collect(),
+        Err(_) => return Vec::new(),
+    };
+    let column = |name: &'static str| {
+        if present.iter().any(|have| have == name) {
+            name
+        } else {
+            "NULL"
+        }
+    };
+    let sql = format!(
+        "SELECT chatId, {}, {}, {}, {} FROM NTChatRoom",
+        column("lastSeenLogId"),
+        column("countOfNewMessage"),
+        column("watermarkKeys"),
+        column("watermarkValues"),
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<i64>>(1).ok().flatten(),
+            row.get::<_, Option<i64>>(2).ok().flatten(),
+            row.get::<_, Option<Vec<u8>>>(3).ok().flatten(),
+            row.get::<_, Option<Vec<u8>>>(4).ok().flatten(),
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .filter(|(chat_id, ..)| only_chats.is_none_or(|ids| ids.contains(chat_id)))
+        .map(|(chat_id, last_seen, unread, keys, values)| ChatReadState {
+            chat_id: chat_id.to_string(),
+            last_seen_log_id: last_seen,
+            new_message_count: unread,
+            my_watermark_log_id: watermark_of(user_id, keys.as_deref(), values.as_deref()),
+        })
+        .collect()
+}
+
+/// `user_id`'s value in a room's watermark: the entry of `values` at the position `user_id`
+/// holds in `keys`, both binary-plist integer arrays.
+fn watermark_of(user_id: i64, keys: Option<&[u8]>, values: Option<&[u8]>) -> Option<i64> {
+    let keys = bplist::int_array_up_to(keys?, WATERMARK_MAX_ENTRIES)?;
+    let values = bplist::int_array_up_to(values?, WATERMARK_MAX_ENTRIES)?;
+    let position = keys.iter().position(|key| *key == user_id)?;
+    values.get(position).copied()
 }
 
 /// Resolve a human-readable chat name, falling back in order: an explicit
@@ -729,6 +798,7 @@ pub fn read_databases_for_chats(
 
     let mut chats: HashMap<String, ChatRecord> = HashMap::new();
     let mut messages_by_id: HashMap<String, RawMessage> = HashMap::new();
+    let mut read_states: HashMap<String, ChatReadState> = HashMap::new();
     let mut stopped: Vec<SourceCursor> = Vec::new();
     let mut incremental = !openable.is_empty() && !skipped;
 
@@ -751,6 +821,7 @@ pub fn read_databases_for_chats(
         // store) must not abort messages already gathered from a healthy DB:
         // log a one-line warning (filename only) and skip this DB.
         let read = read_one(conn, user_id, &account, &users, after, only_chats);
+        let db_read_states = load_read_states(conn, user_id, only_chats);
         drop(snapshot);
         let (db_chats, db_messages) = match read {
             Ok(result) => result,
@@ -763,6 +834,9 @@ pub fn read_databases_for_chats(
         stopped.extend(newest);
         for (chat_id, record) in db_chats {
             chats.entry(chat_id).or_insert(record);
+        }
+        for state in db_read_states {
+            read_states.entry(state.chat_id.clone()).or_insert(state);
         }
         for message in db_messages {
             messages_by_id
@@ -781,12 +855,15 @@ pub fn read_databases_for_chats(
 
     let mut chat_list: Vec<ChatRecord> = chats.into_values().collect();
     chat_list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+    let mut read_states: Vec<ChatReadState> = read_states.into_values().collect();
+    read_states.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
 
     Ok(ReaderOutput {
         chats: chat_list,
         messages,
         cursors: stopped,
         incremental,
+        read_states,
     })
 }
 

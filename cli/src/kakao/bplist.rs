@@ -14,12 +14,17 @@
 /// the values in order. Returns `None` when the blob is not a binary plist or
 /// its root is not an integer array.
 pub(crate) fn int_array(blob: &[u8]) -> Option<Vec<i64>> {
-    const HEADER: &[u8] = b"bplist00";
-    const TRAILER_LEN: usize = 32;
     // A member list this long is corrupt, not real (KakaoTalk previews only a
     // handful). Refusing it stops a local-DB fault from amplifying into a huge
     // Vec / giant reconstructed chat name.
-    const MAX_ELEMENTS: usize = 256;
+    int_array_up_to(blob, 256)
+}
+
+/// [`int_array`] for an array that may legitimately hold up to `max_elements` values, such as
+/// one entry per member of a large open chat.
+pub(crate) fn int_array_up_to(blob: &[u8], max_elements: usize) -> Option<Vec<i64>> {
+    const HEADER: &[u8] = b"bplist00";
+    const TRAILER_LEN: usize = 32;
     if blob.len() < HEADER.len() + TRAILER_LEN || &blob[..HEADER.len()] != HEADER {
         return None;
     }
@@ -64,7 +69,7 @@ pub(crate) fn int_array(blob: &[u8]) -> Option<Vec<i64>> {
         return None;
     }
     let (count, mut cursor) = collection_count(blob, root_offset)?;
-    if count > MAX_ELEMENTS {
+    if count > max_elements {
         return None;
     }
 

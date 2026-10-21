@@ -319,4 +319,21 @@ pub struct RoomOverview {
     pub message_count: usize,
     pub last_timestamp: Option<String>,
     pub last_message_id: Option<String>,
+    /// The room's read position as of the last macOS sync ([`ChatReadState`]). Log ids are
+    /// decimal strings: they exceed what a JSON number holds exactly in JavaScript.
+    pub last_seen_log_id: Option<String>,
+    pub new_message_count: Option<i64>,
+    pub my_watermark_log_id: Option<String>,
+}
+
+/// One room's read position as KakaoTalk keeps it in `NTChatRoom`: `lastSeenLogId`,
+/// `countOfNewMessage`, and the account owner's entry in the `watermarkKeys`/`watermarkValues`
+/// pair. Which of them tracks what the owner has read is not settled, so all three are kept.
+/// `None` when the column is missing or the value cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatReadState {
+    pub chat_id: String,
+    pub last_seen_log_id: Option<i64>,
+    pub new_message_count: Option<i64>,
+    pub my_watermark_log_id: Option<i64>,
 }

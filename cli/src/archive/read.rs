@@ -389,7 +389,8 @@ impl Archive {
                         (SELECT m.timestamp FROM messages m WHERE m.chat_id = c.chat_id
                            ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1),
                         (SELECT m.message_id FROM messages m WHERE m.chat_id = c.chat_id
-                           ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1)
+                           ORDER BY m.timestamp DESC, m.message_id DESC LIMIT 1),
+                        c.last_seen_log_id, c.new_message_count, c.my_watermark_log_id
                  FROM chats c
                  ORDER BY 5 DESC NULLS LAST, c.chat_name",
             )
@@ -403,6 +404,9 @@ impl Archive {
                     message_count: row.get::<_, i64>(3)? as usize,
                     last_timestamp: row.get(4)?,
                     last_message_id: row.get(5)?,
+                    last_seen_log_id: row.get::<_, Option<i64>>(6)?.map(|id| id.to_string()),
+                    new_message_count: row.get(7)?,
+                    my_watermark_log_id: row.get::<_, Option<i64>>(8)?.map(|id| id.to_string()),
                 })
             })
             .map_err(Error::Sql)?

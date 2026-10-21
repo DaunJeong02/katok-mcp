@@ -204,7 +204,9 @@ pub(crate) enum Commands {
     /// List every chat in the archive with message count and newest message (talk2build branch).
     ///
     /// `chat_type` is `direct`, `group`, or `self` (the memo chat whose only member is you,
-    /// named after your own nickname as KakaoTalk titles its window).
+    /// named after your own nickname as KakaoTalk titles its window). `last_seen_log_id`,
+    /// `new_message_count` and `my_watermark_log_id` are the read position KakaoTalk keeps for
+    /// the room, as of the last macOS sync; `null` when KakaoTalk has none.
     Rooms {
         #[arg(long)]
         json: bool,

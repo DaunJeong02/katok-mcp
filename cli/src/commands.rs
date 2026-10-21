@@ -515,6 +515,9 @@ fn run_sync(
         let upsert_started = Instant::now();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
         archive
+            .record_read_states(&read.read_states)
+            .context("record read states")?;
+        archive
             .record_source_cursors(&cursor_source, &read.cursors)
             .context("record source cursors")?;
         let upsert_messages = upsert_started.elapsed().as_millis();

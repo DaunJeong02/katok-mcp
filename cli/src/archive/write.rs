@@ -1,7 +1,7 @@
 use super::model::DeletedMessage;
 use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
-    types::{RawMessage, SourceCursor, SyncReport, TouchedChat},
+    types::{ChatReadState, RawMessage, SourceCursor, SyncReport, TouchedChat},
     Error, Result,
 };
 use chrono::{DateTime, Utc};
@@ -238,6 +238,32 @@ impl Archive {
             // CLI sets this for `sync --incremental`.
             incremental: None,
         })
+    }
+
+    /// Store each room's read position on its `chats` row. A room the archive has no row for
+    /// is skipped, so a read position never adds a room to the archive.
+    pub fn record_read_states(&self, states: &[ChatReadState]) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "UPDATE chats
+                 SET last_seen_log_id = ?2, new_message_count = ?3, my_watermark_log_id = ?4
+                 WHERE chat_id = ?1
+                   AND (last_seen_log_id IS NOT ?2
+                        OR new_message_count IS NOT ?3
+                        OR my_watermark_log_id IS NOT ?4)",
+            )
+            .map_err(Error::Sql)?;
+        for state in states {
+            stmt.execute(params![
+                state.chat_id,
+                state.last_seen_log_id,
+                state.new_message_count,
+                state.my_watermark_log_id
+            ])
+            .map_err(Error::Sql)?;
+        }
+        Ok(())
     }
 
     /// Drop the chunk artifacts of `chat_id` whose start is at or after `from_started_at`.

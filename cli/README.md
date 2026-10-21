@@ -381,6 +381,14 @@ katok doctor --macos-probe --json
 
 멘션은 macOS 소스만 채웁니다. 이 필드가 생기기 전에 아카이브된 메시지는 플래그 없는 sync가 원본을 다시 읽을 때 채워지고, 그 전에는 빈 값으로 보입니다. 멘션이 없는 기존 행은 업그레이드 뒤 sync에서 바뀐 행으로 세지 않습니다.
 
+`katok rooms --json`의 각 방에는 카카오톡 `NTChatRoom`이 기록한 읽음 위치 세 필드가 붙습니다. 어느 값이 "내가 읽은 곳"을 정확히 따라가는지 아직 확정하지 않았으므로 셋 다 내보냅니다.
+
+- `last_seen_log_id`: `lastSeenLogId`입니다.
+- `new_message_count`: `countOfNewMessage`입니다.
+- `my_watermark_log_id`: `watermarkKeys`/`watermarkValues` 쌍에서 내 user_id 자리의 값입니다.
+
+log id는 `mentioned_user_ids`와 같은 이유로 10진 문자열이고, `new_message_count`는 숫자입니다. 원본에 열이 없거나 값을 읽지 못하면 `null`입니다. 값은 macOS sync가 아카이브의 `chats`에 저장한 것이고 `rooms`는 원본을 직접 읽지 않습니다. sync는 증분이든 아니든 매번 모든 방(`--chat`이면 그 방들)의 읽음 위치를 다시 읽으므로, 새 메시지 없이 카카오톡에서 방을 읽기만 해도 다음 sync에 반영됩니다. 아카이브에 없는 방은 읽음 위치만으로 추가되지 않습니다.
+
 ## 개인정보와 로컬 파일
 
 이 프로젝트가 다루는 파일은 모두 민감 정보로 취급합니다.

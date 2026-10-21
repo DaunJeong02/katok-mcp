@@ -623,3 +623,187 @@ fn an_archive_from_before_mentions_upgrades_without_rewriting_its_rows() {
         serde_json::json!(["600"])
     );
 }
+
+/// A `bplist00` whose root is an array of 8-byte integers, the shape KakaoTalk stores
+/// `watermarkKeys`/`watermarkValues` in.
+fn bplist_ints(values: &[i64]) -> Vec<u8> {
+    let count = values.len();
+    let mut out = b"bplist00".to_vec();
+    let mut offsets = vec![out.len()];
+    if count < 15 {
+        out.push(0xa0 | count as u8);
+    } else {
+        out.push(0xaf);
+        out.push(0x11);
+        out.extend((count as u16).to_be_bytes());
+    }
+    for index in 1..=count {
+        out.extend((index as u16).to_be_bytes());
+    }
+    for value in values {
+        offsets.push(out.len());
+        out.push(0x13);
+        out.extend(value.to_be_bytes());
+    }
+    let table = out.len();
+    for offset in &offsets {
+        out.extend((*offset as u32).to_be_bytes());
+    }
+    out.extend([0u8; 6]);
+    out.extend([4, 2]);
+    out.extend((count as u64 + 1).to_be_bytes());
+    out.extend(0u64.to_be_bytes());
+    out.extend((table as u64).to_be_bytes());
+    out
+}
+
+/// Past 2^53, where a JSON number in JavaScript stops being exact.
+const BIG_LOG_ID: i64 = 9_007_199_254_740_993;
+
+impl Install {
+    fn add_read_state_columns(&self) {
+        self.source()
+            .execute_batch(
+                "ALTER TABLE NTChatRoom ADD COLUMN lastSeenLogId INTEGER;
+                 ALTER TABLE NTChatRoom ADD COLUMN countOfNewMessage INTEGER;
+                 ALTER TABLE NTChatRoom ADD COLUMN watermarkKeys BLOB;
+                 ALTER TABLE NTChatRoom ADD COLUMN watermarkValues BLOB;",
+            )
+            .expect("read state columns");
+    }
+
+    fn set_read_state(&self, chat: i64, last_seen: Option<i64>, unread: i64, marks: &[(i64, i64)]) {
+        let keys: Vec<i64> = marks.iter().map(|(user, _)| *user).collect();
+        let values: Vec<i64> = marks.iter().map(|(_, log)| *log).collect();
+        self.source()
+            .execute(
+                "UPDATE NTChatRoom SET lastSeenLogId = ?2, countOfNewMessage = ?3,
+                     watermarkKeys = ?4, watermarkValues = ?5
+                 WHERE chatId = ?1",
+                params![
+                    chat,
+                    last_seen,
+                    unread,
+                    bplist_ints(&keys),
+                    bplist_ints(&values)
+                ],
+            )
+            .expect("read state");
+    }
+
+    fn room(&self, chat: i64) -> Value {
+        let rooms = self.json(&["rooms", "--json"]);
+        let id = chat.to_string();
+        rooms
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|room| room["chat_id"] == id.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("room {chat} missing"))
+    }
+}
+
+#[test]
+fn rooms_report_each_read_position_kakaotalk_keeps() {
+    let install = install();
+    install.add_read_state_columns();
+    install.set_read_state(
+        GROUP_A,
+        Some(BIG_LOG_ID),
+        2,
+        &[(PEER, 5), (TEST_USER_ID, BIG_LOG_ID + 2)],
+    );
+    install.set_read_state(GROUP_B, None, 0, &[(PEER, 7)]);
+    install.json(&["sync", "--source", "macos", "--json"]);
+
+    let a = install.room(GROUP_A);
+    assert_eq!(
+        a["last_seen_log_id"],
+        BIG_LOG_ID.to_string(),
+        "exact, as a string"
+    );
+    assert_eq!(a["new_message_count"], 2);
+    assert_eq!(a["my_watermark_log_id"], (BIG_LOG_ID + 2).to_string());
+    let b = install.room(GROUP_B);
+    assert_eq!(b["last_seen_log_id"], Value::Null);
+    assert_eq!(b["new_message_count"], 0);
+    assert_eq!(
+        b["my_watermark_log_id"],
+        Value::Null,
+        "no watermark entry of mine"
+    );
+
+    // Reading the room in KakaoTalk moves the position without adding a message.
+    install.set_read_state(GROUP_A, Some(3), 0, &[(TEST_USER_ID, 3)]);
+    let quiet = install.json(&["sync", "--source", "macos", "--incremental", "--json"]);
+    assert_eq!(quiet["inserted_messages"], 0);
+    let a = install.room(GROUP_A);
+    assert_eq!(a["last_seen_log_id"], "3");
+    assert_eq!(a["new_message_count"], 0);
+    assert_eq!(a["my_watermark_log_id"], "3");
+}
+
+#[test]
+fn a_watermark_is_found_in_a_room_of_hundreds() {
+    let install = install();
+    install.add_read_state_columns();
+    let mut marks: Vec<(i64, i64)> = (0..400).map(|n| (10_000 + n, n)).collect();
+    marks.push((TEST_USER_ID, 77));
+    install.set_read_state(GROUP_A, Some(1), 0, &marks);
+    install.json(&["sync", "--source", "macos", "--chat", "100", "--json"]);
+    assert_eq!(install.room(GROUP_A)["my_watermark_log_id"], "77");
+}
+
+#[test]
+fn read_positions_are_null_where_kakaotalk_has_none_and_skip_unarchived_rooms() {
+    let install = install();
+    install.json(&["sync", "--source", "macos", "--chat", "100", "--json"]);
+    let a = install.room(GROUP_A);
+    for field in [
+        "last_seen_log_id",
+        "new_message_count",
+        "my_watermark_log_id",
+    ] {
+        assert_eq!(a[field], Value::Null, "{field} without the source column");
+    }
+
+    // An install with some of the columns still reports the ones it has.
+    install
+        .source()
+        .execute_batch(
+            "ALTER TABLE NTChatRoom ADD COLUMN lastSeenLogId INTEGER;
+             ALTER TABLE NTChatRoom ADD COLUMN countOfNewMessage INTEGER;
+             UPDATE NTChatRoom SET lastSeenLogId = 2, countOfNewMessage = 1;",
+        )
+        .expect("partial read state columns");
+    install.json(&["sync", "--source", "macos", "--chat", "100", "--json"]);
+    let a = install.room(GROUP_A);
+    assert_eq!(a["last_seen_log_id"], "2");
+    assert_eq!(a["new_message_count"], 1);
+    assert_eq!(a["my_watermark_log_id"], Value::Null);
+
+    // A room KakaoTalk lists with a read position but no message stays out of the archive.
+    install
+        .source()
+        .execute(
+            "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount,
+                                    lastSeenLogId, countOfNewMessage)
+             VALUES (300, 0, 1, 'Synthetic Empty Room', 3, 4, 0)",
+            [],
+        )
+        .expect("empty room");
+    install.json(&["sync", "--source", "macos", "--json"]);
+    let rooms = install.json(&["rooms", "--json"]);
+    let ids: Vec<&str> = rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|room| room["chat_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&"300"),
+        "a read position never adds a room: {ids:?}"
+    );
+    assert_eq!(ids.len(), 2);
+}

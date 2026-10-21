@@ -18,6 +18,15 @@
   `messages` columns added on open; a row without mentions keeps NULL, so the first sync after
   the upgrade rewrites only rows that do have one.
 
+### Rooms
+
+- `katok rooms --json` adds `last_seen_log_id`, `new_message_count` and
+  `my_watermark_log_id`: the room's `lastSeenLogId`, `countOfNewMessage` and the account
+  owner's entry in the `watermarkKeys`/`watermarkValues` binary plists. Which of them tracks
+  what the owner has read is not settled, so all three are reported; log ids are decimal
+  strings, missing values `null`. Every macOS sync, incremental or not, re-reads them for all
+  rooms it covers and stores them on existing `chats` rows only.
+
 ### Forget
 
 - `katok forget --chat <chat_id> [--yes]` deletes one chat's rows from every archive table
