@@ -29,3 +29,13 @@
 - `katok media backfill --dry-run`은 CDN 요청만 건너뛴다. 사진·영상의 로컬 캐시 복호화는 dry run에서도 파일을 쓴다. 규모만 확인할 때는 `kind: ["file"]`로 한다.
 - 단위 테스트는 외부 효과(키체인, openssl, 파일 시스템, katok)를 주입해 모킹한다. 실제 키체인 항목을 만들거나 지우는 테스트를 넣지 않는다.
 - 변경 후 `cd mcp && pnpm check`가 통과해야 한다.
+
+## Enter Message 사이드카 소비자
+
+`cli/`는 Enter Message(`01_business/08_enter-message`)가 Tauri 사이드카(`externalBin`)로 번들한다. 고정 커밋의 소스를 그쪽 `release.yml`이 cargo로 빌드한다. 작업 항목과 상태의 정본은 그 저장소의 `docs/kakaotalk-tab/ROADMAP.md`다.
+
+- **`--json` 출력이 API다.** 필드 추가만 허용한다. 삭제·의미 변경은 하지 않는다. 바꿔야 하면 새 플래그로 분기한다.
+- **기본 동작을 바꾸지 않는다.** 새 기능은 새 서브커맨드나 플래그로만 넣는다. 플래그 없이 부르면 지금과 같아야 `mcp/`와 `35_talk-2-build`가 그대로 돈다.
+- **호출 계약.** `--data-dir` 필수, 키는 `KATOK_ARCHIVE_KEY` 환경변수, stdout은 JSON만, 실패는 0이 아닌 종료 코드와 stderr 한 줄 원인. 이 계약을 어기면 Enter Message 상태 줄이 원인을 못 보여 준다.
+- `cli/` 변경은 작게, 별도 커밋으로, 기존 규칙대로 CI 게이트 5개를 전부 돌린다. `36_katok` 반영은 별도 결정이다.
+- 원격은 아직 없다. GitHub `EnterNext/katok-mcp` 등록은 사용자 확인 후에 한다.
