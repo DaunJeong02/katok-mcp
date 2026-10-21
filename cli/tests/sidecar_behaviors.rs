@@ -893,3 +893,54 @@ fn a_running_process_is_found_by_its_exact_name() {
         Some(false)
     );
 }
+
+/// Sync, then push the source's newest rows more than the reader's re-read margin past room B's
+/// rows, so a cursor that survived `forget` would start reading after them.
+fn synced_then_moved_on(args: &[&str]) -> Install {
+    let install = install();
+    install.json(args);
+    for log in 10..90 {
+        install.insert(GROUP_A, log, PEER, None);
+    }
+    install
+}
+
+#[test]
+fn a_forgotten_room_comes_back_whole_on_the_next_filtered_sync() {
+    let both = [
+        "sync",
+        "--source",
+        "macos",
+        "--chat",
+        "100",
+        "--chat",
+        "200",
+        "--incremental",
+        "--json",
+    ];
+    let install = synced_then_moved_on(&both);
+    install.json(&["forget", "--chat", "200", "--yes", "--json"]);
+    assert_eq!(install.archived(GROUP_B), 0);
+
+    let report = install.json(&both);
+    assert_eq!(
+        report["incremental"],
+        Value::Bool(false),
+        "the cursor the room was synced under is gone, so the set is read in full"
+    );
+    assert_eq!(
+        install.archived(GROUP_B),
+        3,
+        "every row of the room is back"
+    );
+}
+
+#[test]
+fn a_forgotten_room_comes_back_whole_on_the_next_unfiltered_sync() {
+    let plain = ["sync", "--source", "macos", "--incremental", "--json"];
+    let install = synced_then_moved_on(&plain);
+    install.json(&["forget", "--chat", "200", "--yes", "--json"]);
+    let report = install.json(&plain);
+    assert_eq!(report["incremental"], Value::Bool(false));
+    assert_eq!(install.archived(GROUP_B), 3);
+}

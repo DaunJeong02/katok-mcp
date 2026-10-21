@@ -147,7 +147,8 @@ pub(crate) enum Commands {
     /// vectors cannot be removed one chat at a time, so a deletion leaves a rebuild marker in
     /// the semantic index directory, reported by `doctor`, until the next `katok index` (run
     /// `--full`). KakaoTalk itself is untouched: a later sync that reads the chat archives it
-    /// again, so drop it from `sync --chat` first.
+    /// again, whole, so drop it from `sync --chat` first. Deleting resets every incremental
+    /// cursor, so the next `--incremental` sync reads the source in full once.
     Forget {
         /// chat_id to delete; repeat for more.
         #[arg(long = "chat", value_name = "CHAT_ID", required = true)]

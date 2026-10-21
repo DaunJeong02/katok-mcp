@@ -496,6 +496,19 @@ impl Archive {
         Ok(cursors)
     }
 
+    /// Drop the per-database cursors of every source and every set of chats, so the next sync
+    /// of each reads the source in full. The cursors do not record which chats they passed, so
+    /// after a chat is forgotten none of them can be trusted not to skip its rows.
+    pub(super) fn clear_source_cursors(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM sync_cursors WHERE instr(source_id, ?1) > 0",
+                params![ROWID_CURSOR_MARK],
+            )
+            .map(drop)
+            .map_err(Error::Sql)
+    }
+
     /// Stores where this sync stopped, inside the caller's transaction so a sync that fails
     /// after reading leaves the previous cursors, and the next sync reads that range again. A
     /// database's cursors replace all its earlier ones; a database this sync did not read keeps
@@ -809,8 +822,10 @@ fn mentioned_user_ids_column(ids: &[String]) -> Option<String> {
 /// `<prefix><db>/<rowid>`. The account-time cursor rows are keyed by the 64-hex account hash,
 /// which never has this shape.
 fn source_cursor_prefix(source: &str) -> String {
-    format!("{source}-rowid:")
+    format!("{source}{ROWID_CURSOR_MARK}")
 }
+
+const ROWID_CURSOR_MARK: &str = "-rowid:";
 
 fn parse_source_cursor(db: &str, value: &str) -> Option<SourceCursor> {
     let mut parts = value.split(':');

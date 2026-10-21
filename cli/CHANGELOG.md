@@ -44,7 +44,10 @@
   only counts. A reply from another chat into the forgotten one keeps its row and loses its
   parent. Semantic vectors cannot be dropped per chat, so a `REBUILD_REQUIRED` marker is left
   in the semantic directory and reported as `doctor --json` `semantic_rebuild_required` until
-  an index run that started after it commits.
+  an index run that started after it commits. It also clears every incremental source cursor,
+  plain and per chat set: they do not record which chats they passed, and a surviving one made
+  the next `--incremental` sync of the forgotten chat skip its history while reporting
+  `incremental: true`. The next incremental sync reads the source in full once.
 
 ### Index
 

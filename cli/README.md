@@ -256,7 +256,7 @@ sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가
 
 `katok sync --source macos --chat <chat_id> --json`은 지정한 방만 읽어 아카이브에 넣습니다. `--chat`은 여러 번 줄 수 있습니다. 다른 방의 행은 카카오톡 DB 쿼리 단계에서 걸러지므로 본문을 메모리로 읽지도 않고, 아카이브의 `chats`에도 들어가지 않습니다. macOS 소스의 chat_id는 숫자여야 하고, 빈 값은 거부합니다(빈 값을 버리면 모든 방을 읽는 sync가 되기 때문입니다). `--prune-preview`/`--prune-deleted`와 함께 쓸 수 없습니다.
 
-커서 설계: 증분 커서는 방과 무관하게 DB 테이블 전체의 가장 최근 행 8개입니다. 필터 sync가 이 커서를 무필터 커서 자리에 저장하면, 건너뛴 방의 새 행이 커서 앞에 남아 다음 무필터 `--incremental`이 그 행을 영영 읽지 않습니다. 그래서 필터 sync는 무필터 커서를 읽지도 쓰지도 않고, 방 집합(정렬·중복 제거한 chat_id의 해시)마다 별도 커서를 씁니다. 같은 집합으로 다시 실행하면 순서·중복과 무관하게 증분으로 읽고, 집합이 바뀌면(방 추가·제거) 첫 실행은 그 방들을 전체로 읽습니다. 새로 추가한 방의 과거 기록도 그때 들어옵니다. 집합마다 남는 커서는 DB 파일당 8행이라 지우지 않습니다.
+커서 설계: 증분 커서는 방과 무관하게 DB 테이블 전체의 가장 최근 행 8개입니다. 필터 sync가 이 커서를 무필터 커서 자리에 저장하면, 건너뛴 방의 새 행이 커서 앞에 남아 다음 무필터 `--incremental`이 그 행을 영영 읽지 않습니다. 그래서 필터 sync는 무필터 커서를 읽지도 쓰지도 않고, 방 집합(정렬·중복 제거한 chat_id의 해시)마다 별도 커서를 씁니다. 같은 집합으로 다시 실행하면 순서·중복과 무관하게 증분으로 읽고, 집합이 바뀌면(방 추가·제거) 첫 실행은 그 방들을 전체로 읽습니다. 새로 추가한 방의 과거 기록도 그때 들어옵니다. 집합마다 남는 커서는 DB 파일당 8행이라 지우지 않습니다. 단 `forget --yes`는 무필터·필터 커서를 전부 지웁니다. 커서는 어느 방을 지나갔는지 기록하지 않아서, 지운 방이 든 커서만 골라낼 수 없고 남겨 두면 그 방을 다시 sync할 때 커서 앞의 과거 기록이 빠지기 때문입니다. 대가는 다음 `--incremental` sync 한 번이 전체를 읽는 것입니다.
 
 요구사항:
 
@@ -337,7 +337,7 @@ katok send --chat <chat-id> --text "메시지" --accept-use-policy --json
 
 `katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
 
-`katok forget --chat <chat-id>`는 한 방을 아카이브에서 지웁니다. `--chat`은 여러 번 줄 수 있습니다. `--yes` 없이 실행하면 아무것도 지우지 않고 지울 행 수만 테이블별로 보여 줍니다. `--yes`를 주면 그 방의 `messages`·`chats`·`chunks`·`chunks_fts`·`chunk_messages`·`chunk_parent_refs`·`parent_chunks`·`parent_chunk_children`·`reply_edges` 행을 한 트랜잭션으로 지우고, 기본 위치(`<data-dir>/media/<chat-id>`, `<data-dir>/transcripts`)의 저장된 미디어와 transcript도 지웁니다. `--out`으로 다른 곳에 저장한 파일은 추적하지 않습니다. 다른 방에서 이 방 메시지에 단 답장은 행이 남고 부모만 `parent_not_in_archive`로 바뀝니다. semantic 벡터는 방 단위로 지울 수 없으므로, 인덱스가 있으면 semantic 디렉터리에 `REBUILD_REQUIRED` 표식을 남기고 `next_step`으로 `katok index --full --json`을 안내합니다. `doctor --json`의 `semantic_rebuild_required`가 이 표식을 보여 줍니다. 다음 `katok index`는 아카이브의 현재 창만으로 새 generation을 만들고 옛 generation을 지우므로, 시작 전에 있던 표식을 지웁니다(실행 도중에 생긴 표식은 남깁니다). 카카오톡 원본은 건드리지 않으므로, 그 방을 읽는 sync가 다시 돌면 다시 들어옵니다. 먼저 `sync --chat` 목록에서 빼세요.
+`katok forget --chat <chat-id>`는 한 방을 아카이브에서 지웁니다. `--chat`은 여러 번 줄 수 있습니다. `--yes` 없이 실행하면 아무것도 지우지 않고 지울 행 수만 테이블별로 보여 줍니다. `--yes`를 주면 그 방의 `messages`·`chats`·`chunks`·`chunks_fts`·`chunk_messages`·`chunk_parent_refs`·`parent_chunks`·`parent_chunk_children`·`reply_edges` 행을 한 트랜잭션으로 지우고, 기본 위치(`<data-dir>/media/<chat-id>`, `<data-dir>/transcripts`)의 저장된 미디어와 transcript도 지웁니다. `--out`으로 다른 곳에 저장한 파일은 추적하지 않습니다. 다른 방에서 이 방 메시지에 단 답장은 행이 남고 부모만 `parent_not_in_archive`로 바뀝니다. semantic 벡터는 방 단위로 지울 수 없으므로, 인덱스가 있으면 semantic 디렉터리에 `REBUILD_REQUIRED` 표식을 남기고 `next_step`으로 `katok index --full --json`을 안내합니다. `doctor --json`의 `semantic_rebuild_required`가 이 표식을 보여 줍니다. 다음 `katok index`는 아카이브의 현재 창만으로 새 generation을 만들고 옛 generation을 지우므로, 시작 전에 있던 표식을 지웁니다(실행 도중에 생긴 표식은 남깁니다). 카카오톡 원본은 건드리지 않으므로, 그 방을 읽는 sync가 다시 돌면 과거 기록까지 전부 다시 들어옵니다(커서 초기화는 위 커서 설계 참고). 먼저 `sync --chat` 목록에서 빼세요.
 
 권한 진단이 필요할 때만:
 
