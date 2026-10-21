@@ -308,6 +308,10 @@ pub struct MessageRow {
     /// were read, until a full sync reads it again.
     pub mentioned_user_ids: Vec<String>,
     pub mentions_all: bool,
+    /// Whether `mentioned_user_ids` holds the account owner, by the same rule as `is_mine`, so a
+    /// caller can tell it was mentioned without knowing its own user id. A room-wide mention
+    /// stays in `mentions_all` and does not set this.
+    pub mentions_me: bool,
 }
 
 /// One chat as the archive knows it, with tail metadata for cursoring and room lists.

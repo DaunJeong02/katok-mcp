@@ -10,6 +10,7 @@ messages[].is_feed
 messages[].is_mine
 messages[].mentioned_user_ids
 messages[].mentions_all
+messages[].mentions_me
 messages[].message_id
 messages[].message_type
 messages[].reply_to_message_id

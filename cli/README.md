@@ -380,10 +380,11 @@ katok doctor --macos-probe --json
 
 `katok`을 다른 앱이 번들해 부를 때 쓰는 출력입니다. `--json` 출력은 필드를 더하기만 하고 기존 필드를 지우거나 뜻을 바꾸지 않습니다. `tests/fixtures/json-keys/`의 골든 파일이 Enter Message가 의존하는 키 계약이고, `tests/json_contract.rs`가 키가 빠지면 실패합니다(새 키는 `UPDATE_GOLDEN=1 cargo test --test json_contract`로 골든을 갱신해 함께 커밋합니다). 방 단위 sync는 `sync --chat`, 방 삭제는 `forget`(위 설명)을 씁니다.
 
-`katok messages --chat <chat-id> --json`의 각 메시지에는 멘션 두 필드가 붙습니다.
+`katok messages --chat <chat-id> --json`의 각 메시지에는 멘션 세 필드가 붙습니다.
 
 - `mentioned_user_ids`: 그 메시지가 멘션한 사용자 id 배열입니다. 카카오톡 `attachment` 메타데이터의 최상위 `mentions[].user_id`만 읽고, 답장이 인용한 메시지의 `src_mentions`는 읽지 않습니다. 본문의 "@"는 근거로 쓰지 않습니다. id는 JavaScript 숫자로 정확히 담기지 않을 만큼 크므로 `sender_id`처럼 10진 문자열입니다. 멘션이 없으면 빈 배열입니다.
 - `mentions_all`: 방 전체 멘션(`all_mention`)이면 `true`입니다.
+- `mentions_me`: `mentioned_user_ids`에 내 user_id가 있으면 `true`입니다. 내 user_id 평문 없이 멘션 여부를 알기 위한 필드입니다. `is_mine`과 같은 규칙으로 비교합니다. id의 sha256을 아카이브의 `account_hash`와 견주고, `--me <id>`를 주면 그 값과 견줍니다. 방 전체 멘션은 `mentions_all`에만 나타나고 이 값을 켜지 않습니다.
 
 멘션은 macOS 소스만 채웁니다. 이 필드가 생기기 전에 아카이브된 메시지는 플래그 없는 sync가 원본을 다시 읽을 때 채워지고, 그 전에는 빈 값으로 보입니다. 멘션이 없는 기존 행은 업그레이드 뒤 sync에서 바뀐 행으로 세지 않습니다.
 

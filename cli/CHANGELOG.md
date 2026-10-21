@@ -21,6 +21,10 @@
   `attachment` JSON; a reply's `src_mentions` is not this message's mention. Stored in two new
   `messages` columns added on open; a row without mentions keeps NULL, so the first sync after
   the upgrade rewrites only rows that do have one.
+- `katok messages --json` adds `mentions_me`: whether `mentioned_user_ids` holds the account
+  owner, compared by the same rule as `is_mine` (the id's sha256 against the archive's
+  `account_hash`, or `--me` when given), so a caller learns it was mentioned without holding its
+  own user id in plain text. A room-wide mention stays in `mentions_all` and does not set it.
 
 ### Rooms
 
