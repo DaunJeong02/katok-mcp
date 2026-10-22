@@ -108,6 +108,14 @@
 
 ### Send
 
+- `send --chat` no longer uses an already-open window when the archive holds another chat of
+  the same name. It fails with the usual "N chats are named ..." refusal even when exactly one
+  window of that name is open, since a window title carries only the name and the window may
+  belong to either room. With that window closed, `--chat` opens the room from the chat list,
+  where the last-message ranking tells same-named rooms apart; under `--no-open` it fails
+  instead. `--room` is unchanged. `RoomTarget` gains `same_name_chats`, filled from the new
+  `Archive::same_name_chat_count`. The refusal's advice now reads "pass --chat with no window
+  of that name open"; its opening "N chats are named '...'" is unchanged.
 - `send --draft --image` is refused at argument parsing with a sentence that says
   why (an image cannot be left as a draft) and what to do instead, rather than
   clap's generic conflict wording; `--draft --dry-run` gets the same treatment.

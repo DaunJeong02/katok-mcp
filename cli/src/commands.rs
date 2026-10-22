@@ -285,9 +285,15 @@ fn run_send(
                 .chat_identity(chat_id)
                 .context("look up chat")?
                 .with_context(|| format!("no chat {chat_id} in the archive; run sync first"))?;
+            // An open window shows only the name, so it is used only when no other archived
+            // chat carries that name.
+            let same_name_chats = archive
+                .same_name_chat_count(&name)
+                .context("count chats sharing the name")?;
             ax_send::RoomTarget {
                 name,
                 rank: Some(rank),
+                same_name_chats: Some(same_name_chats),
             }
         }
         (Some(name), None) => ax_send::RoomTarget::named(name),

@@ -285,6 +285,8 @@ katok send --chat <chat-id> --dry-run --json
 katok send --room "정확한 방 이름" --dry-run --json
 ```
 
+방 이름은 고유하지 않습니다. 채팅 목록에 같은 이름의 방이 둘 이상이면 `--room`은 고르지 않고 거부합니다. `--chat`은 아카이브의 마지막 메시지 시각으로 채팅 목록의 줄을 고릅니다. 이미 열린 창은 제목, 곧 이름만 보여 주므로 어느 방의 창인지 알 수 없습니다. 그래서 아카이브에 같은 이름의 방이 둘 이상이면 `--chat`은 열린 창이 하나뿐이어도 쓰지 않고 거부합니다. 그 이름의 창을 닫고 다시 실행하면 채팅 목록에서 방을 엽니다. `--no-open`이면 열지 않고 실패합니다.
+
 실제 텍스트·이미지 전송 또는 초안 입력에는
 [`ACCEPTABLE_USE_POLICY.md`](ACCEPTABLE_USE_POLICY.md)와
 [`DISCLAIMER.md`](DISCLAIMER.md)를 읽었다는 명시적 확인이 필요합니다.

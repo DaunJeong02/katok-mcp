@@ -297,7 +297,10 @@ pub(crate) enum Commands {
         /// Address the room by its `chat_id`, as `search` and `chunks` report it.
         ///
         /// Unambiguous: the name and the last-message time are both read from the archive, and
-        /// together they pick the right row even when two rooms share a name.
+        /// together they pick the right chat-list row even when two rooms share a name. An open
+        /// window shows only the name, so when the archive holds another room of that name the
+        /// open window is not used and the send is refused; close it and the room is opened from
+        /// the chat list instead (`--no-open` then fails).
         #[arg(long, conflicts_with = "room")]
         chat: Option<String>,
         /// Message body. Reads stdin when omitted.

@@ -171,6 +171,23 @@ impl Archive {
         Ok(Some((name, rank as usize)))
     }
 
+    /// How many chats carry `chat_name`: distinct `chat_id`s among the `messages` rows with that
+    /// name, the same rows [`Archive::chat_identity`] ranks.
+    ///
+    /// `send --chat` asks before it uses an already-open window. A window title is only a name,
+    /// so when two or more chats share it the open window may be any of them.
+    pub fn same_name_chat_count(&self, chat_name: &str) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(DISTINCT chat_id) FROM messages WHERE chat_name = ?1",
+                [chat_name],
+                |row| row.get(0),
+            )
+            .map_err(Error::Sql)?;
+        Ok(count as usize)
+    }
+
     pub fn raw_messages(&self) -> Result<Vec<StoredMessage>> {
         let mut stmt = self
             .conn

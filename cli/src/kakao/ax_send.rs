@@ -633,8 +633,9 @@ pub enum SendError {
     SearchUnavailable,
     #[error(
         "{count} chats are named '{room}', and nothing on screen tells them apart. Nothing was \
-         opened: sending to the wrong one cannot be undone. Pass --chat <chat-id> so the last \
-         message can be used to pick, or rename one of them."
+         opened: sending to the wrong one cannot be undone. Pass --chat <chat-id> with no window \
+         of that name open, since a window title does not say which room it is, so the chat \
+         list's last-message order can pick; or rename one of them."
     )]
     AmbiguousRoom { room: String, count: usize },
     #[error(
@@ -927,6 +928,10 @@ pub struct RoomTarget {
     /// How many same-named chats are more recently active than this one, which
     /// is its index among the same-named rows of a most-recent-first chat list.
     pub rank: Option<usize>,
+    /// How many chats in the archive carry this name, the target included, when
+    /// the target came from a `chat_id`. `None` for a bare name, which the
+    /// archive was not asked about.
+    pub same_name_chats: Option<usize>,
 }
 
 impl RoomTarget {
@@ -934,7 +939,35 @@ impl RoomTarget {
         Self {
             name: name.to_string(),
             rank: None,
+            same_name_chats: None,
         }
+    }
+}
+
+/// Which already-open window, if any, may be used as the target's window.
+///
+/// `hits` indexes the open windows titled with the target's name. `Ok(None)`
+/// means none is open and the room has to be opened from the chat list, where
+/// `rank` can tell same-named rooms apart.
+///
+/// A window title is a name and nothing more. Two such windows are ambiguous
+/// outright. One is ambiguous too when the target came from a `chat_id` and the
+/// archive holds other chats of that name: it may be any of them, and opening
+/// from the chat list is the only step that can pick the right one.
+fn open_window_choice(hits: &[usize], target: &RoomTarget) -> Result<Option<usize>, SendError> {
+    match hits {
+        [] => Ok(None),
+        [only] => match target.same_name_chats {
+            Some(count) if count >= 2 => Err(SendError::AmbiguousRoom {
+                room: target.name.clone(),
+                count,
+            }),
+            _ => Ok(Some(*only)),
+        },
+        _ => Err(SendError::AmbiguousRoom {
+            room: target.name.clone(),
+            count: hits.len(),
+        }),
     }
 }
 
@@ -1769,15 +1802,10 @@ fn resolve_window(
     let (windows, hits) = find();
     // An already-open window is the fast path, but two rooms sharing a name can
     // each have one, and a window title carries no more identity than a list row
-    // does. Refuse for the same reason.
-    if hits.len() > 1 {
-        return Err(SendError::AmbiguousRoom {
-            room: target.name.clone(),
-            count: hits.len(),
-        });
-    }
-    if let Some(i) = hits.first() {
-        return Ok(AxRef::retained(windows[*i].as_raw()));
+    // does. Refuse for the same reason, and refuse a single window too when the
+    // archive knows of another room by that name.
+    if let Some(i) = open_window_choice(&hits, target)? {
+        return Ok(AxRef::retained(windows[i].as_raw()));
     }
     if !allow_open {
         return Err(SendError::WindowNotOpen {
@@ -2138,6 +2166,76 @@ mod window_focus_tests {
     #[test]
     fn an_unreadable_focus_blocks_the_keystroke() {
         assert!(!keystroke_may_post::<str>("Alpha", None));
+    }
+}
+
+#[cfg(test)]
+mod open_window_choice_tests {
+    use super::{open_window_choice, RoomTarget, SendError};
+
+    fn by_chat_id(same_name_chats: usize) -> RoomTarget {
+        RoomTarget {
+            name: "Synthetic Club".to_string(),
+            rank: Some(0),
+            same_name_chats: Some(same_name_chats),
+        }
+    }
+
+    fn ambiguous_count(outcome: Result<Option<usize>, SendError>) -> usize {
+        match outcome {
+            Err(SendError::AmbiguousRoom { count, .. }) => count,
+            other => panic!("expected AmbiguousRoom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_open_window_falls_through_to_the_chat_list() {
+        assert!(matches!(
+            open_window_choice(&[], &RoomTarget::named("Synthetic Club")),
+            Ok(None)
+        ));
+        // The chat list can still pick by rank, so a shared name is not refused here.
+        assert!(matches!(open_window_choice(&[], &by_chat_id(2)), Ok(None)));
+    }
+
+    #[test]
+    fn one_window_is_used_when_its_name_is_unique_or_was_given_by_name() {
+        assert!(matches!(
+            open_window_choice(&[3], &RoomTarget::named("Synthetic Club")),
+            Ok(Some(3))
+        ));
+        assert!(matches!(
+            open_window_choice(&[3], &by_chat_id(1)),
+            Ok(Some(3))
+        ));
+    }
+
+    #[test]
+    fn one_window_is_refused_for_a_chat_id_whose_name_the_archive_shares() {
+        let outcome = open_window_choice(&[3], &by_chat_id(2));
+        let message = match &outcome {
+            Err(error) => error.to_string(),
+            Ok(_) => String::new(),
+        };
+        assert_eq!(ambiguous_count(outcome), 2, "the archive's count");
+        // The sidecar app recognises this refusal by that substring.
+        assert!(message.contains(" chats are named "), "{message}");
+        assert_eq!(ambiguous_count(open_window_choice(&[0], &by_chat_id(3))), 3);
+    }
+
+    #[test]
+    fn two_windows_are_refused_whatever_the_target() {
+        assert_eq!(
+            ambiguous_count(open_window_choice(
+                &[1, 4],
+                &RoomTarget::named("Synthetic Club")
+            )),
+            2
+        );
+        assert_eq!(
+            ambiguous_count(open_window_choice(&[1, 4], &by_chat_id(1))),
+            2
+        );
     }
 }
 
