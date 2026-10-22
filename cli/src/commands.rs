@@ -8,7 +8,7 @@ use katok::{
         rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings, CHUNKER_VERSION,
     },
     config::KatokConfig,
-    search::{bm25_search_scoped, keyword_search_scoped},
+    search::{bm25_search_scoped, keyword_search_ordered},
     semantic::semantic_search_live_with_config,
     transcript::export_transcript,
     types::{RawMessage, SyncTimings},
@@ -701,14 +701,16 @@ fn run_search(
             query,
             limit,
             chat,
+            order,
             json,
         } => {
-            let hits = keyword_search_scoped(
+            let hits = keyword_search_ordered(
                 &archive,
                 &query,
                 limit,
                 config.snippet_length,
                 chat.as_deref(),
+                order.into(),
             )
             .context("keyword search")?;
             print_payload(json, &hits)

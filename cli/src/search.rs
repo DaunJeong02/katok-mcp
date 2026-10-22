@@ -14,6 +14,17 @@ pub fn keyword_search_with_snippet(
     keyword_search_scoped(archive, query, limit, snippet_length, None)
 }
 
+/// Which end of the time range keyword search fills `limit` from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeywordOrder {
+    /// Oldest chunk first: `started_at, chunk_id`. The historical order.
+    #[default]
+    Oldest,
+    /// Newest chunk first: `started_at DESC, chunk_id DESC`, applied before `LIMIT`, so a small
+    /// limit returns the most recent hits rather than the first ones ever archived.
+    Newest,
+}
+
 /// Keyword search restricted to one chat when `chat_id` is given (talk2build branch).
 pub fn keyword_search_scoped(
     archive: &Archive,
@@ -22,19 +33,48 @@ pub fn keyword_search_scoped(
     snippet_length: usize,
     chat_id: Option<&str>,
 ) -> Result<Vec<SearchHit>> {
+    keyword_search_ordered(
+        archive,
+        query,
+        limit,
+        snippet_length,
+        chat_id,
+        KeywordOrder::Oldest,
+    )
+}
+
+/// [`keyword_search_scoped`] with the order the `limit` rows are taken in.
+///
+/// The query is a literal substring: `%`, `_` and `\` in it match themselves, not the LIKE
+/// wildcards they would otherwise be.
+pub fn keyword_search_ordered(
+    archive: &Archive,
+    query: &str,
+    limit: usize,
+    snippet_length: usize,
+    chat_id: Option<&str>,
+    order: KeywordOrder,
+) -> Result<Vec<SearchHit>> {
     if query.trim().is_empty() {
         return Err(Error::EmptyQuery);
     }
-    let pattern = format!("%{}%", query.trim());
-    let mut stmt = archive
-        .connection()
-        .prepare(
+    let pattern = format!("%{}%", escape_like(query.trim()));
+    // ORDER BY cannot be bound as a parameter, so each order is its own fixed statement.
+    let sql = match order {
+        KeywordOrder::Oldest => {
             "SELECT chunk_id FROM chunks
-         WHERE text LIKE ?1 AND (?3 IS NULL OR chat_id = ?3)
+         WHERE text LIKE ?1 ESCAPE '\\' AND (?3 IS NULL OR chat_id = ?3)
          ORDER BY started_at, chunk_id
-         LIMIT ?2",
-        )
-        .map_err(Error::Sql)?;
+         LIMIT ?2"
+        }
+        KeywordOrder::Newest => {
+            "SELECT chunk_id FROM chunks
+         WHERE text LIKE ?1 ESCAPE '\\' AND (?3 IS NULL OR chat_id = ?3)
+         ORDER BY started_at DESC, chunk_id DESC
+         LIMIT ?2"
+        }
+    };
+    let mut stmt = archive.connection().prepare(sql).map_err(Error::Sql)?;
     let ids = stmt
         .query_map(params![pattern, limit as i64, chat_id], |row| {
             row.get::<_, String>(0)
@@ -89,6 +129,16 @@ pub fn bm25_search_scoped(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Error::Sql)?;
     hydrate_hits(archive, ids, "bm25", query, snippet_length)
+}
+
+/// `query` with the LIKE metacharacters escaped for `ESCAPE '\'` (one backslash in SQL).
+///
+/// The escape character goes first, or the backslashes added for `%` and `_` would be doubled.
+fn escape_like(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn literal_fts_query(query: &str) -> String {
@@ -178,6 +228,24 @@ fn snippet(text: &str, query: &str, max_chars: usize) -> String {
         .skip(start_char.saturating_sub(20))
         .take(max_chars)
         .collect()
+}
+
+#[cfg(test)]
+mod escape_like_tests {
+    use super::escape_like;
+
+    #[test]
+    fn wildcards_and_the_escape_character_are_escaped() {
+        assert_eq!(escape_like("100%"), "100\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        assert_eq!(escape_like(r"C:\dir"), r"C:\\dir");
+        assert_eq!(escape_like(r"\%"), r"\\\%");
+    }
+
+    #[test]
+    fn plain_text_is_left_alone() {
+        assert_eq!(escape_like("보고서 초안"), "보고서 초안");
+    }
 }
 
 #[cfg(test)]

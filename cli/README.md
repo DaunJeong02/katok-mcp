@@ -181,7 +181,7 @@ katok media backfill --kind file --kind video --json
 
 ## 검색 방식
 
-`katok search keyword`는 빠르고 결정적인 부분 문자열 검색입니다. 정확한 단어, 이름, 계좌번호, 고유명사처럼 그대로 기억나는 값을 찾을 때 씁니다.
+`katok search keyword`는 빠르고 결정적인 부분 문자열 검색입니다. 정확한 단어, 이름, 계좌번호, 고유명사처럼 그대로 기억나는 값을 찾을 때 씁니다. 검색어 안의 `%`, `_`, `\`는 와일드카드가 아니라 그 문자 자체로 찾습니다. 결과는 오래된 chunk부터 `--limit`개를 채웁니다. `--order newest`를 주면 최신 chunk부터 채우므로, 적은 `--limit`로 최근 언급만 볼 때 씁니다.
 
 `katok search bm25`는 SQLite FTS5 BM25 랭킹을 사용합니다. 여러 단어가 섞인 일반 질의에 적합합니다.
 
@@ -324,6 +324,7 @@ katok sync --source macos --chat <chat-id> --since <unix-ms> --json
 katok sync --json
 katok index --json
 katok search keyword "보고서" --json
+katok search keyword "보고서" --order newest --limit 5 --json
 katok search bm25 "보고서" --json
 katok search semantic "회의 보고서" --json
 katok chunk get <chunk-id> --json

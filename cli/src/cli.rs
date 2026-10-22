@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// What to tell someone who passes `--draft` with `--image`.
@@ -305,6 +305,9 @@ pub(crate) enum Commands {
 
 #[derive(Subcommand)]
 pub(crate) enum SearchCommand {
+    /// Literal substring search over chunk text.
+    ///
+    /// `%`, `_` and `\` in the query match themselves; they are not wildcards.
     Keyword {
         query: String,
         /// Maximum number of results to return.
@@ -313,6 +316,10 @@ pub(crate) enum SearchCommand {
         /// Restrict hits to one chat_id (talk2build branch).
         #[arg(long)]
         chat: Option<String>,
+        /// Which end of time `--limit` takes hits from: `oldest` first (the default) or
+        /// `newest` first.
+        #[arg(long, value_enum, default_value_t = KeywordOrderArg::Oldest)]
+        order: KeywordOrderArg,
         #[arg(long)]
         json: bool,
     },
@@ -335,6 +342,24 @@ pub(crate) enum SearchCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// `search keyword --order`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum KeywordOrderArg {
+    /// Oldest chunk first.
+    Oldest,
+    /// Newest chunk first.
+    Newest,
+}
+
+impl From<KeywordOrderArg> for katok::search::KeywordOrder {
+    fn from(order: KeywordOrderArg) -> Self {
+        match order {
+            KeywordOrderArg::Oldest => Self::Oldest,
+            KeywordOrderArg::Newest => Self::Newest,
+        }
+    }
 }
 
 #[derive(Subcommand)]

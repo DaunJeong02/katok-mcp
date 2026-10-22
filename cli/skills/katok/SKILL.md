@@ -30,6 +30,7 @@ katok index --full --json                 # full rebuild instead of incremental
 katok wipe-index --yes                    # drops the local index
 katok source chats --source macos --json  # lists rooms with their chat ids
 katok search keyword "검색어" --json
+katok search keyword "검색어" --order newest --limit 5 --json   # latest hits first
 katok search bm25 "검색어" --json
 katok search semantic "지난 회의 보고서" --json
 katok chunk get <chunk-id> --json

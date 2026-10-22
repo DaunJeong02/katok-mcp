@@ -39,6 +39,18 @@
   direct chat without a preview gives its peer) and `is_open_chat` (`linkId != 0`), stored and
   refreshed the same way. `ChatReadState` is renamed `ChatRoomState` to carry them.
 
+### Search
+
+- `katok search keyword --order <oldest|newest>` chooses which end of time `--limit` fills
+  from. `oldest`, the default, is the existing `started_at, chunk_id` order. `newest` sorts
+  `started_at DESC, chunk_id DESC` before the limit, so a small limit returns the latest hits
+  instead of the first ones ever archived. `search bm25` keeps its rank order and has no
+  `--order`.
+- `katok search keyword` now matches `%`, `_` and `\` in the query literally (LIKE with
+  `ESCAPE '\'`). They used to be wildcards, so a query containing one returns fewer hits than
+  before: `100%` no longer matches `1000`, and `a_b` no longer matches `axb`. Queries without
+  them match as before.
+
 ### Doctor
 
 - `doctor --json` adds `kakao_app.status` (`running`/`not_running` by `pgrep -x KakaoTalk`,
