@@ -465,7 +465,10 @@ impl IndexWriterGuard {
     fn acquire(root: &Path) -> Result<Self> {
         let path = root.join("index-writer.sqlite3");
         let conn = Connection::open(&path).map_err(Error::Sql)?;
-        conn.busy_timeout(Duration::ZERO).map_err(Error::Sql)?;
+        // The launchd job and the MCP server share one data dir, so a writer that is just
+        // finishing should be waited for briefly instead of failing the second run at once.
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(Error::Sql)?;
         conn.execute_batch("BEGIN EXCLUSIVE")
             .map_err(|_| Error::SemanticIndexBusy(path))?;
         Ok(Self { conn })

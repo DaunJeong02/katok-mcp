@@ -94,6 +94,10 @@
 
 ### Index
 
+- A `katok index` that finds another index run holding the writer lock now waits up to 5 s for
+  it before failing with `semantic_index_busy`, instead of failing at once. A scheduled
+  (launchd) index and an MCP server pointed at the same data dir would otherwise collide on a
+  run that was about to finish. A run that stays busy longer still fails the same way.
 - `katok index` now validates the staged generation against the archive snapshot it
   started from instead of re-reading the live archive at commit time. A `katok sync`
   that lands during a long embedding pass used to fail the commit with
