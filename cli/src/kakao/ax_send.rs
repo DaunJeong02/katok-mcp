@@ -633,9 +633,9 @@ pub enum SendError {
     SearchUnavailable,
     #[error(
         "{count} chats are named '{room}', and nothing on screen tells them apart. Nothing was \
-         opened: sending to the wrong one cannot be undone. Pass --chat <chat-id> with no window \
-         of that name open, since a window title does not say which room it is, so the chat \
-         list's last-message order can pick; or rename one of them."
+         opened: sending to the wrong one cannot be undone. Address the room with --chat \
+         <chat-id> and without --no-open, with at most one window of that name open, so it is \
+         picked from the chat list by its last message; or rename one of them."
     )]
     AmbiguousRoom { room: String, count: usize },
     #[error(
@@ -944,25 +944,88 @@ impl RoomTarget {
     }
 }
 
+/// What to do with the open windows titled with the target's name.
+#[derive(Debug, PartialEq, Eq)]
+enum OpenWindow {
+    /// Use this window: it is the only one, and nothing else in the archive has that name.
+    Use(usize),
+    /// None is open: open the room from the chat list.
+    Open,
+    /// Open the room from the chat list even though this window of that name is already open.
+    /// It may belong to another room of the same name, so it is accepted afterwards only if the
+    /// chat-list click proves it is the target ([`after_reopen_click`]).
+    Reopen(usize),
+}
+
 /// Which already-open window, if any, may be used as the target's window.
 ///
-/// `hits` indexes the open windows titled with the target's name. `Ok(None)`
-/// means none is open and the room has to be opened from the chat list, where
-/// `rank` can tell same-named rooms apart.
-///
-/// A window title is a name and nothing more. Two such windows are ambiguous
-/// outright. One is ambiguous too when the target came from a `chat_id` and the
-/// archive holds other chats of that name: it may be any of them, and opening
-/// from the chat list is the only step that can pick the right one.
-fn open_window_choice(hits: &[usize], target: &RoomTarget) -> Result<Option<usize>, SendError> {
+/// `hits` indexes the open windows titled with the target's name. A window title
+/// is a name and nothing more. Two such windows are ambiguous outright. One is
+/// ambiguous too when the target came from a `chat_id` and the archive holds
+/// other chats of that name: it may be any of them. Then the room is opened from
+/// the chat list, where `rank` picks the row, or the send is refused when opening
+/// is not allowed.
+fn open_window_choice(
+    hits: &[usize],
+    target: &RoomTarget,
+    allow_open: bool,
+) -> Result<OpenWindow, SendError> {
     match hits {
-        [] => Ok(None),
+        [] => Ok(OpenWindow::Open),
         [only] => match target.same_name_chats {
-            Some(count) if count >= 2 => Err(SendError::AmbiguousRoom {
-                room: target.name.clone(),
-                count,
-            }),
-            _ => Ok(Some(*only)),
+            Some(count) if count >= 2 => {
+                if allow_open {
+                    Ok(OpenWindow::Reopen(*only))
+                } else {
+                    Err(SendError::AmbiguousRoom {
+                        room: target.name.clone(),
+                        count,
+                    })
+                }
+            }
+            _ => Ok(OpenWindow::Use(*only)),
+        },
+        _ => Err(SendError::AmbiguousRoom {
+            room: target.name.clone(),
+            count: hits.len(),
+        }),
+    }
+}
+
+/// One look at the windows after a chat-list click made under [`OpenWindow::Reopen`].
+#[derive(Debug, PartialEq, Eq)]
+enum AfterReopen {
+    /// The target's window.
+    Window(usize),
+    /// Nothing decided yet; look again.
+    Pending,
+}
+
+/// Decide, from one look after the click, which window is the room that was clicked.
+///
+/// `hits` indexes the windows titled with the target's name, `stale` the one that
+/// was open before the click (if it still is), and `focused` the focused window
+/// when it is one of `hits`. `last` is the final look of the wait.
+///
+/// A window that was not there before is the clicked room: the click opened it.
+/// The window that was there before is accepted only on the last look, when no new
+/// window has appeared in the whole wait, and only when it is focused. The chat
+/// list is raised before the click, so focus moves to that window only when the
+/// click brought it forward. Accepting it on sight instead would pick the other
+/// room whenever the clicked room's window was still opening.
+fn after_reopen_click(
+    hits: &[usize],
+    stale: Option<usize>,
+    focused: Option<usize>,
+    last: bool,
+    target: &RoomTarget,
+) -> Result<AfterReopen, SendError> {
+    let fresh: Vec<usize> = hits.iter().copied().filter(|&i| Some(i) != stale).collect();
+    match fresh[..] {
+        [window] => Ok(AfterReopen::Window(window)),
+        [] => match stale {
+            Some(window) if last && focused == Some(window) => Ok(AfterReopen::Window(window)),
+            _ => Ok(AfterReopen::Pending),
         },
         _ => Err(SendError::AmbiguousRoom {
             room: target.name.clone(),
@@ -1802,12 +1865,15 @@ fn resolve_window(
     let (windows, hits) = find();
     // An already-open window is the fast path, but two rooms sharing a name can
     // each have one, and a window title carries no more identity than a list row
-    // does. Refuse for the same reason, and refuse a single window too when the
-    // archive knows of another room by that name.
-    if let Some(i) = open_window_choice(&hits, target)? {
-        return Ok(AxRef::retained(windows[i].as_raw()));
-    }
-    if !allow_open {
+    // does. Refuse for the same reason. A single window is not trusted either when
+    // the archive knows of another room by that name: the room is opened from the
+    // chat list instead, and that window is kept to be told apart afterwards.
+    let stale = match open_window_choice(&hits, target, allow_open)? {
+        OpenWindow::Use(i) => return Ok(AxRef::retained(windows[i].as_raw())),
+        OpenWindow::Reopen(i) => Some(AxRef::retained(windows[i].as_raw())),
+        OpenWindow::Open => None,
+    };
+    if stale.is_none() && !allow_open {
         return Err(SendError::WindowNotOpen {
             room: target.name.clone(),
             open: open_titles(&windows),
@@ -1869,15 +1935,27 @@ fn resolve_window(
             return outcome.map(|()| unreachable!());
         }
         match outcome {
-            Ok(()) => match wait_for_window(&find, 20) {
-                Some(w) => {
-                    clear_search(&windows);
-                    return Ok(w);
+            Ok(()) => {
+                let opened = match &stale {
+                    None => Ok(wait_for_window(&find, 20)),
+                    Some(stale) => wait_for_reopened_window(&find, stale, pid, target, 20),
+                };
+                match opened {
+                    Ok(Some(w)) => {
+                        clear_search(&windows);
+                        return Ok(w);
+                    }
+                    // Selected it but nothing opened — record that, do not let an earlier,
+                    // less relevant error be the one reported.
+                    Ok(None) => last = Some(SendError::RoomOpenFailed(target.name.clone())),
+                    // Same-named windows nothing can tell apart: retrying cannot change that.
+                    Err(err) => {
+                        clear_search(&windows);
+                        drop(hold);
+                        return Err(err);
+                    }
                 }
-                // Selected it but nothing opened — record that, do not let an earlier,
-                // less relevant error be the one reported.
-                None => last = Some(SendError::RoomOpenFailed(target.name.clone())),
-            },
+            }
             Err(e) => last = Some(e),
         }
         if attempt % 3 == 0 {
@@ -1904,6 +1982,37 @@ where
         }
     }
     None
+}
+
+/// [`wait_for_window`] for a click made while `stale`, a window of the same name,
+/// was already open: see [`after_reopen_click`] for which window counts.
+///
+/// Unlike [`wait_for_window`] it does not return at the first single match, since
+/// at first that match is `stale` itself, whichever room it belongs to. A click
+/// that brought `stale` forward is therefore only accepted after the whole wait,
+/// about 2 s.
+fn wait_for_reopened_window<F>(
+    find: &F,
+    stale: &AxRef,
+    pid: i32,
+    target: &RoomTarget,
+    attempts: u32,
+) -> Result<Option<AxRef>, SendError>
+where
+    F: Fn() -> (Vec<AxRef>, Vec<usize>),
+{
+    for attempt in 1..=attempts {
+        std::thread::sleep(Duration::from_millis(100));
+        let (windows, hits) = find();
+        let position = |window: &AxRef| hits.iter().copied().find(|&i| windows[i] == *window);
+        let stale_at = position(stale);
+        let focused_at = focused_window(pid).and_then(|focused| position(&focused));
+        match after_reopen_click(&hits, stale_at, focused_at, attempt == attempts, target)? {
+            AfterReopen::Window(i) => return Ok(Some(AxRef::retained(windows[i].as_raw()))),
+            AfterReopen::Pending => {}
+        }
+    }
+    Ok(None)
 }
 
 fn kakaotalk_pid() -> Option<i32> {
@@ -2171,7 +2280,9 @@ mod window_focus_tests {
 
 #[cfg(test)]
 mod open_window_choice_tests {
-    use super::{open_window_choice, RoomTarget, SendError};
+    use super::{
+        after_reopen_click, open_window_choice, AfterReopen, OpenWindow, RoomTarget, SendError,
+    };
 
     fn by_chat_id(same_name_chats: usize) -> RoomTarget {
         RoomTarget {
@@ -2181,7 +2292,11 @@ mod open_window_choice_tests {
         }
     }
 
-    fn ambiguous_count(outcome: Result<Option<usize>, SendError>) -> usize {
+    fn by_name() -> RoomTarget {
+        RoomTarget::named("Synthetic Club")
+    }
+
+    fn ambiguous_count<T: std::fmt::Debug>(outcome: Result<T, SendError>) -> usize {
         match outcome {
             Err(SendError::AmbiguousRoom { count, .. }) => count,
             other => panic!("expected AmbiguousRoom, got {other:?}"),
@@ -2189,30 +2304,45 @@ mod open_window_choice_tests {
     }
 
     #[test]
-    fn no_open_window_falls_through_to_the_chat_list() {
-        assert!(matches!(
-            open_window_choice(&[], &RoomTarget::named("Synthetic Club")),
-            Ok(None)
-        ));
-        // The chat list can still pick by rank, so a shared name is not refused here.
-        assert!(matches!(open_window_choice(&[], &by_chat_id(2)), Ok(None)));
+    fn no_open_window_opens_from_the_chat_list() {
+        for allow_open in [true, false] {
+            // `--no-open` then fails with WindowNotOpen, as before.
+            assert_eq!(
+                open_window_choice(&[], &by_name(), allow_open).unwrap(),
+                OpenWindow::Open
+            );
+            assert_eq!(
+                open_window_choice(&[], &by_chat_id(2), allow_open).unwrap(),
+                OpenWindow::Open
+            );
+        }
     }
 
     #[test]
-    fn one_window_is_used_when_its_name_is_unique_or_was_given_by_name() {
-        assert!(matches!(
-            open_window_choice(&[3], &RoomTarget::named("Synthetic Club")),
-            Ok(Some(3))
-        ));
-        assert!(matches!(
-            open_window_choice(&[3], &by_chat_id(1)),
-            Ok(Some(3))
-        ));
+    fn one_window_is_the_fast_path_when_its_name_is_unique_or_was_given_by_name() {
+        for allow_open in [true, false] {
+            assert_eq!(
+                open_window_choice(&[3], &by_name(), allow_open).unwrap(),
+                OpenWindow::Use(3)
+            );
+            assert_eq!(
+                open_window_choice(&[3], &by_chat_id(1), allow_open).unwrap(),
+                OpenWindow::Use(3)
+            );
+        }
     }
 
     #[test]
-    fn one_window_is_refused_for_a_chat_id_whose_name_the_archive_shares() {
-        let outcome = open_window_choice(&[3], &by_chat_id(2));
+    fn one_window_of_a_shared_name_goes_through_the_chat_list_when_opening_is_allowed() {
+        assert_eq!(
+            open_window_choice(&[3], &by_chat_id(2), true).unwrap(),
+            OpenWindow::Reopen(3)
+        );
+    }
+
+    #[test]
+    fn one_window_of_a_shared_name_is_refused_under_no_open() {
+        let outcome = open_window_choice(&[3], &by_chat_id(2), false);
         let message = match &outcome {
             Err(error) => error.to_string(),
             Ok(_) => String::new(),
@@ -2220,21 +2350,90 @@ mod open_window_choice_tests {
         assert_eq!(ambiguous_count(outcome), 2, "the archive's count");
         // The sidecar app recognises this refusal by that substring.
         assert!(message.contains(" chats are named "), "{message}");
-        assert_eq!(ambiguous_count(open_window_choice(&[0], &by_chat_id(3))), 3);
+        assert!(message.contains("--no-open"), "{message}");
+        assert_eq!(
+            ambiguous_count(open_window_choice(&[0], &by_chat_id(3), false)),
+            3
+        );
     }
 
     #[test]
     fn two_windows_are_refused_whatever_the_target() {
+        for allow_open in [true, false] {
+            assert_eq!(
+                ambiguous_count(open_window_choice(&[1, 4], &by_name(), allow_open)),
+                2
+            );
+            assert_eq!(
+                ambiguous_count(open_window_choice(&[1, 4], &by_chat_id(1), allow_open)),
+                2
+            );
+            assert_eq!(
+                ambiguous_count(open_window_choice(&[1, 4], &by_chat_id(2), allow_open)),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn after_the_click_a_new_window_is_the_clicked_room() {
+        let target = by_chat_id(2);
+        // The stale window is still there, and focused or not, the new one is the room.
+        for focused in [None, Some(3), Some(5)] {
+            for last in [false, true] {
+                assert_eq!(
+                    after_reopen_click(&[3, 5], Some(3), focused, last, &target).unwrap(),
+                    AfterReopen::Window(5)
+                );
+            }
+        }
+        // The stale window was closed meanwhile and the room's window opened.
         assert_eq!(
-            ambiguous_count(open_window_choice(
-                &[1, 4],
-                &RoomTarget::named("Synthetic Club")
-            )),
-            2
+            after_reopen_click(&[5], None, None, false, &target).unwrap(),
+            AfterReopen::Window(5)
+        );
+    }
+
+    #[test]
+    fn the_stale_window_is_never_taken_on_sight() {
+        let target = by_chat_id(2);
+        // Focused right away is still not enough before the wait is over: the clicked
+        // room's own window may be about to open.
+        assert_eq!(
+            after_reopen_click(&[3], Some(3), Some(3), false, &target).unwrap(),
+            AfterReopen::Pending
+        );
+    }
+
+    #[test]
+    fn the_stale_window_is_taken_at_the_end_only_if_the_click_focused_it() {
+        let target = by_chat_id(2);
+        assert_eq!(
+            after_reopen_click(&[3], Some(3), Some(3), true, &target).unwrap(),
+            AfterReopen::Window(3)
+        );
+        // Not focused: the click did not bring it forward, so it is not known to be the room.
+        assert_eq!(
+            after_reopen_click(&[3], Some(3), None, true, &target).unwrap(),
+            AfterReopen::Pending
         );
         assert_eq!(
-            ambiguous_count(open_window_choice(&[1, 4], &by_chat_id(1))),
-            2
+            after_reopen_click(&[], None, None, true, &target).unwrap(),
+            AfterReopen::Pending
+        );
+    }
+
+    #[test]
+    fn two_new_windows_are_refused() {
+        assert_eq!(
+            ambiguous_count(after_reopen_click(
+                &[3, 5, 6],
+                Some(3),
+                None,
+                false,
+                &by_chat_id(2)
+            )),
+            3
         );
     }
 }

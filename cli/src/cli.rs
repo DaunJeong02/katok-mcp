@@ -298,9 +298,11 @@ pub(crate) enum Commands {
         ///
         /// Unambiguous: the name and the last-message time are both read from the archive, and
         /// together they pick the right chat-list row even when two rooms share a name. An open
-        /// window shows only the name, so when the archive holds another room of that name the
-        /// open window is not used and the send is refused; close it and the room is opened from
-        /// the chat list instead (`--no-open` then fails).
+        /// window shows only the name, so when the archive holds another room of that name an
+        /// open window is not trusted: the room is opened from the chat list, which takes the
+        /// screen briefly and about 2 s, and `--no-open` refuses instead. The archive knows only
+        /// the rooms it has synced, so after `sync --chat` of some rooms it cannot see a
+        /// same-named room it never read.
         #[arg(long, conflicts_with = "room")]
         chat: Option<String>,
         /// Message body. Reads stdin when omitted.

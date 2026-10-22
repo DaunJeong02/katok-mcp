@@ -108,14 +108,20 @@
 
 ### Send
 
-- `send --chat` no longer uses an already-open window when the archive holds another chat of
-  the same name. It fails with the usual "N chats are named ..." refusal even when exactly one
-  window of that name is open, since a window title carries only the name and the window may
-  belong to either room. With that window closed, `--chat` opens the room from the chat list,
-  where the last-message ranking tells same-named rooms apart; under `--no-open` it fails
-  instead. `--room` is unchanged. `RoomTarget` gains `same_name_chats`, filled from the new
-  `Archive::same_name_chat_count`. The refusal's advice now reads "pass --chat with no window
-  of that name open"; its opening "N chats are named '...'" is unchanged.
+- `send --chat` no longer trusts an already-open window when the archive holds another chat of
+  the same name: a window title carries only the name, so the window may belong to either room.
+  It opens the room from the chat list instead, where the last-message ranking picks the row. A
+  window of that name that appears after the click is the room. The window that was already
+  open counts only when the click focused it and no other window of the name appeared within
+  about 2 s. So a `--dry-run` or a send to such a room with its window open now takes the
+  screen briefly and about 2 s more, where it used to run in the background. Under
+  `--no-open` it fails with the "N chats are named ..." refusal instead. Two open windows of the
+  name are still refused, and `--room` is unchanged. The count is the new
+  `Archive::same_name_chat_count` over archived messages, carried on `RoomTarget` as
+  `same_name_chats`; a room never synced, as in an archive filled by `sync --chat`, is not
+  counted. The refusal's advice now reads "address the room with --chat and without
+  --no-open, with at most one window of that name open"; its opening "N chats are named '...'"
+  is unchanged.
 - `send --draft --image` is refused at argument parsing with a sentence that says
   why (an image cannot be left as a draft) and what to do instead, rather than
   clap's generic conflict wording; `--draft --dry-run` gets the same treatment.

@@ -28,6 +28,10 @@ effect, so user confirmation and the repository's use policy are mandatory.
    exact target and final payload in the current interaction.
 5. Prefer an unambiguous `--chat <chat-id>` over a room name.
 6. Always run `--dry-run` first and show the resolved target to the user.
+   When several rooms share the name, a `--chat` dry run and the send after it
+   still work: katok picks the room from the chat list instead of trusting an
+   open window of that name, which takes the screen for about 2 s. With
+   `--no-open` it refuses rather than guess.
 7. Never retry a failed send automatically. Report the error and stop.
    Exception: the single documented recovery in Troubleshooting (webp/HEIC
    paste-confirm miss → one PNG convert + one `--take-focus-now` resend). That
@@ -143,7 +147,7 @@ katok send --chat <chat-id> --image /tmp/katok-send.png \
 | Symptom | Check |
 |---|---|
 | `resolved: false` / room missing | Wrong `chat_id`; re-run `--dry-run`. Prefer `--chat` over `--room`. |
-| Room ambiguous by name | Always switch to `--chat <chat-id>`. |
+| Room ambiguous by name (`N chats are named ...`) | Switch to `--chat <chat-id>` without `--no-open`; katok then opens the room from the chat list even when a window of that name is open. Two open windows of that name are always refused: ask the user to close one. The archive counts only rooms it has synced. |
 | Image send needs the screen | Image paste uses the system paste menu path; `--take-focus-now` if nobody is at the keyboard. Text send can stay background. |
 | KakaoTalk not running | `pgrep -x KakaoTalk` — start the app first; send drives the live UI. |
 | Want human review before send | `--draft` leaves text in the compose box; person presses Enter. |
