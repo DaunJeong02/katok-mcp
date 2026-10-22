@@ -16,8 +16,8 @@
 ## cli/ 규칙
 
 - `cli/`는 `36_katok`의 `entercut` 브랜치를 git subtree로 가져온 것이다. 변경은 작게, 별도 커밋으로 하고, 나중에 `git subtree pull`이 되도록 이력을 건드리지 않는다.
-- `cli/`를 수정하면 CI가 도는 게이트를 전부 돌린다: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, `cargo publish --dry-run`, `scripts/verify_release_config.py`. 고정 툴체인(`cli/Cargo.toml`의 `rust-version`)으로 확인하고, 일부만 돌려 통과했다고 보고하지 않는다.
-- `/Users/jeongdaun/enternext/01_business/36_katok`, `35_talk-2-build`, `33_enter-cut`은 읽기 전용이다. 수정·커밋하지 않는다.
+- `cli/`를 수정하면 CI가 도는 게이트를 전부 돌린다: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, `cargo publish --dry-run`, `scripts/verify_release_config.py`, 이력 프라이버시 검사(`scripts/verify_history_privacy.py`, CI 6단계). 고정 툴체인(`cli/Cargo.toml`의 `rust-version`)으로 확인하고, 일부만 돌려 통과했다고 보고하지 않는다.
+- `~/enternext/01_business/36_katok`, `35_talk-2-build`, `33_enter-cut`은 읽기 전용이다. 수정·커밋하지 않는다.
 
 ## mcp/ 규칙
 
@@ -36,7 +36,7 @@
 
 - **`--json` 출력이 API다.** 필드 추가만 허용한다. 삭제·의미 변경은 하지 않는다. 바꿔야 하면 새 플래그로 분기한다.
 - **기본 동작을 바꾸지 않는다.** 새 기능은 새 서브커맨드나 플래그로만 넣는다. 플래그 없이 부르면 지금과 같아야 `mcp/`와 `35_talk-2-build`가 그대로 돈다.
-- **호출 계약.** `--data-dir` 필수, 키는 `KATOK_ARCHIVE_KEY` 환경변수, stdout은 JSON만, 실패는 0이 아닌 종료 코드와 stderr 한 줄 원인. 이 계약을 어기면 Enter Message 상태 줄이 원인을 못 보여 준다.
+- **호출 계약.** `--data-dir` 필수, 키는 `KATOK_ARCHIVE_KEY` 환경변수, stdout은 JSON만, 실패는 0이 아닌 종료 코드와 stdout의 `{ok:false,error:{code,message,cause}}` 봉투(`--json` 없이 부르면 stderr 한 줄). 이 계약을 어기면 Enter Message 상태 줄이 원인을 못 보여 준다.
 - **`messages --json`의 `mentions_me`는 내 user_id 평문 없이 멘션 여부를 알기 위한 필드다.** `mentioned_user_ids`를 `is_mine`과 같은 규칙(`sha256(id) == account_hash`, `--me`가 있으면 그 값)으로 비교하고, 방 전체 멘션(`mentions_all`)은 포함하지 않는다.
 - `cli/` 변경은 작게, 별도 커밋으로, 기존 규칙대로 CI 게이트 5개를 전부 돌린다. `36_katok` 반영은 별도 결정이다.
-- 원격은 아직 없다. GitHub `EnterNext/katok-mcp` 등록은 사용자 확인 후에 한다.
+- 원격은 GitHub `EnterNext/katok-mcp`(private)다. Enter Message 릴리스가 이 원격의 고정 커밋 SHA로 사이드카를 빌드하므로 main 이력을 재작성하지 않는다. `cli/.github`는 하위 폴더라 이 모노레포에서는 실행되지 않는다. 루트 CI는 아직 없다.
