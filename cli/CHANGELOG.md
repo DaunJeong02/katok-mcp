@@ -56,10 +56,11 @@
   `started_at DESC, chunk_id DESC` before the limit, so a small limit returns the latest hits
   instead of the first ones ever archived. `search bm25` keeps its rank order and has no
   `--order`.
-- `katok search keyword` now matches `%`, `_` and `\` in the query literally (LIKE with
+- `katok search keyword` now matches `%` and `_` in the query literally (LIKE with
   `ESCAPE '\'`). They used to be wildcards, so a query containing one returns fewer hits than
-  before: `100%` no longer matches `1000`, and `a_b` no longer matches `axb`. Queries without
-  them match as before.
+  before: `100%` no longer matches `1000`, and `a_b` no longer matches `axb`. `\` matched
+  literally before and still does; it is escaped now because it became the escape character.
+  Queries without `%` or `_` match as before.
 
 ### Doctor
 
