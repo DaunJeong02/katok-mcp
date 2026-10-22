@@ -39,7 +39,7 @@ katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
 katok chunks --chat <chat-id> --json      # every chunk in one room (metadata only)
 katok transcript --chat <chat-id> --json                      # exports one room to Markdown
-katok transcript --chat <chat-id> --since 2026-07-20 --json   # only messages at or after a time
+katok transcript --chat <chat-id> --since 2026-07-20 --json   # from 00:00 UTC that day; RFC3339 with any offset also works
 katok transcript --chat <chat-id> --out <dir> --json          # writes outside the data dir
 katok media get --chat <chat-id> --out <dir> --json   # photos, albums, videos, and files
 katok media get --chat <chat-id> --kind file --json   # only file attachments (zip, pdf, xlsx, ...)

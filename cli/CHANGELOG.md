@@ -26,6 +26,16 @@
   `account_hash`, or `--me` when given), so a caller learns it was mentioned without holding its
   own user id in plain text. A room-wide mention stays in `mentions_all` and does not set it.
 
+- `katok messages --since/--until` and `katok transcript --since` take RFC3339 with any
+  offset, or a bare date `YYYY-MM-DD` meaning 00:00:00 UTC, and compare it as an instant: the
+  bound is converted to the archive's stored form (`DateTime<Utc>::to_rfc3339()`, `+00:00`)
+  before the string comparison in SQL. The raw string used to be compared, so a `Z` bound
+  dropped the message stored at that very instant, and a `+09:00` bound was nine hours off. A
+  bare-date `--until` now includes a message at exactly midnight UTC, which the raw comparison
+  left out. Any other value is now a usage error (exit 2, `invalid_arguments` under `--json`)
+  instead of a silent string comparison. `messages --json` still echoes `since`/`until` as
+  given.
+
 ### Rooms
 
 - `katok rooms --json` adds `last_seen_log_id`, `new_message_count` and

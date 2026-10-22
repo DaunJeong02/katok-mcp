@@ -35,6 +35,43 @@ pub(crate) fn conflict_message(error: &clap::Error) -> Option<String> {
     }
 }
 
+/// A `--since`/`--until` bound: what the caller passed, and the same instant in the form the
+/// archive stores timestamps in.
+///
+/// `messages.timestamp` holds `DateTime<Utc>::to_rfc3339()` text, which always ends in `+00:00`,
+/// and the range filters compare it as a string. That orders by instant only against a bound in
+/// the same form: a raw `Z` bound sorts after the `+00:00` row at the same instant and drops it,
+/// and a `+09:00` bound lands nine hours off. So the bound is converted before it reaches SQL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TimeBound {
+    /// The argument as given, echoed back unchanged in `--json` output.
+    pub(crate) raw: String,
+    /// The instant as `DateTime<Utc>::to_rfc3339()`, the exact form the archive stores.
+    pub(crate) stored: String,
+}
+
+/// Parse a `--since`/`--until` value: RFC3339 with any offset, or a date `YYYY-MM-DD` taken as
+/// 00:00:00 UTC that day. Anything else is a usage error.
+pub(crate) fn parse_time_bound(input: &str) -> Result<TimeBound, String> {
+    use chrono::{DateTime, NaiveDate, Utc};
+
+    let instant = if let Ok(instant) = DateTime::parse_from_rfc3339(input) {
+        instant.with_timezone(&Utc)
+    } else if let Ok(day) = NaiveDate::parse_from_str(input, "%Y-%m-%d") {
+        day.and_hms_opt(0, 0, 0)
+            .ok_or_else(|| format!("no midnight on {day}"))?
+            .and_utc()
+    } else {
+        return Err("expected an RFC3339 time such as 2026-07-20T00:00:00Z or \
+             2026-07-20T09:00:00+09:00, or a date such as 2026-07-20 (00:00:00 UTC)"
+            .to_string());
+    };
+    Ok(TimeBound {
+        raw: input.to_string(),
+        stored: instant.to_rfc3339(),
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "katok", about = "katok: local KakaoTalk search CLI", version)]
 pub(crate) struct Cli {
@@ -181,9 +218,12 @@ pub(crate) enum Commands {
         /// chat_id to export, as reported by `source chats` or a search hit.
         #[arg(long)]
         chat: String,
-        /// Only include messages at or after this RFC3339 timestamp.
-        #[arg(long)]
-        since: Option<String>,
+        /// Only include messages at or after this time: RFC3339 with any offset (`Z`,
+        /// `+09:00`), or a date `YYYY-MM-DD` meaning 00:00:00 UTC that day.
+        ///
+        /// Compared as an instant, so every offset selects the same rows as its UTC equivalent.
+        #[arg(long, value_name = "TIME", value_parser = parse_time_bound)]
+        since: Option<TimeBound>,
         /// Directory to write the transcript into.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -193,20 +233,26 @@ pub(crate) enum Commands {
     /// List one chat's archived messages as JSON with sender identity (talk2build branch).
     ///
     /// Reads the archive, not the live KakaoTalk database. Returns the newest `--limit` rows
-    /// inside the optional `--since` / `--until` RFC3339 range, ordered oldest first, so a
-    /// caller can page a mirror view or read a delta after a cursor. Each message carries
-    /// `mentioned_user_ids` (decimal strings) and `mentions_all` from KakaoTalk's mention
-    /// metadata, never from the body text.
+    /// inside the optional `--since` / `--until` range, both ends inclusive, ordered oldest
+    /// first, so a caller can page a mirror view or read a delta after a cursor. The bounds are
+    /// compared as instants, so a message's own `timestamp` passed back as `--since` includes
+    /// that message. `since`/`until` in the output echo the arguments as given. Each message
+    /// carries `mentioned_user_ids` (decimal strings) and `mentions_all` from KakaoTalk's
+    /// mention metadata, never from the body text.
     Messages {
         /// chat_id as reported by `rooms` or `source chats`.
         #[arg(long)]
         chat: String,
-        /// Only include messages at or after this RFC3339 timestamp.
-        #[arg(long)]
-        since: Option<String>,
-        /// Only include messages at or before this RFC3339 timestamp.
-        #[arg(long)]
-        until: Option<String>,
+        /// Only include messages at or after this time: RFC3339 with any offset (`Z`,
+        /// `+09:00`), or a date `YYYY-MM-DD` meaning 00:00:00 UTC that day.
+        #[arg(long, value_name = "TIME", value_parser = parse_time_bound)]
+        since: Option<TimeBound>,
+        /// Only include messages at or before this time, in the same forms as `--since`.
+        ///
+        /// A bare date is the start of that day (00:00:00 UTC), not its end: `--until
+        /// 2026-07-20` takes nothing later than 2026-07-20T00:00:00Z.
+        #[arg(long, value_name = "TIME", value_parser = parse_time_bound)]
+        until: Option<TimeBound>,
         /// Maximum rows, taken from the newest end of the range.
         #[arg(long, default_value_t = 500, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
@@ -468,6 +514,70 @@ pub(crate) enum PermissionsCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[cfg(test)]
+mod time_bound_tests {
+    use super::parse_time_bound;
+
+    fn stored(input: &str) -> String {
+        parse_time_bound(input)
+            .unwrap_or_else(|error| panic!("{input}: {error}"))
+            .stored
+    }
+
+    #[test]
+    fn every_offset_becomes_the_stored_utc_form() {
+        for input in [
+            "2026-07-20T00:00:00Z",
+            "2026-07-20T00:00:00+00:00",
+            "2026-07-20T09:00:00+09:00",
+            "2026-07-19T19:00:00-05:00",
+        ] {
+            assert_eq!(stored(input), "2026-07-20T00:00:00+00:00", "{input}");
+        }
+    }
+
+    #[test]
+    fn the_stored_form_matches_what_sync_writes() {
+        // write.rs stores `DateTime<Utc>::to_rfc3339()`; a bound must come out byte-identical.
+        let instant = chrono::DateTime::parse_from_rfc3339("2026-01-01T09:02:00.250Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            stored("2026-01-01T18:02:00.250+09:00"),
+            instant.to_rfc3339()
+        );
+    }
+
+    #[test]
+    fn a_date_is_midnight_utc() {
+        assert_eq!(stored("2026-07-20"), "2026-07-20T00:00:00+00:00");
+    }
+
+    #[test]
+    fn the_raw_input_is_kept() {
+        let bound = parse_time_bound("2026-07-20T09:00:00+09:00").unwrap();
+        assert_eq!(bound.raw, "2026-07-20T09:00:00+09:00");
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        for input in [
+            "",
+            "soon",
+            "2026",
+            "2026-13-01",
+            "2026-07-20T25:00:00Z",
+            "2026-07-20T00:00:00",
+            "1767258060000",
+        ] {
+            assert!(
+                parse_time_bound(input).is_err(),
+                "{input:?} should be refused"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos", feature = "private-send"))]

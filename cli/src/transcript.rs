@@ -47,7 +47,8 @@ pub struct TranscriptReport {
     pub last_message_id: Option<String>,
 }
 
-/// Write the transcript for `chat_id` covering messages at or after `since` (RFC3339).
+/// Write the transcript for `chat_id` covering messages at or after `since`, a timestamp in the
+/// archive's stored `+00:00` form (see [`Archive::messages_for_transcript`]).
 ///
 /// Writing is atomic and idempotent. The file name carries the message-id range, so a later
 /// export of a different range cannot overwrite an earlier one, and re-exporting the same range

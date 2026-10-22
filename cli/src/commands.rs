@@ -1,4 +1,4 @@
-use crate::cli::{Commands, PermissionsCommand, SearchCommand, SourceCommand};
+use crate::cli::{Commands, PermissionsCommand, SearchCommand, SourceCommand, TimeBound};
 use crate::commands::source_adapter::adapter_for_source;
 use crate::support::{block_on, dependency_status, print_payload};
 use anyhow::{Context, Result};
@@ -129,7 +129,14 @@ pub(crate) fn run(
             since,
             out,
             json,
-        } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
+        } => run_transcript(
+            &chat,
+            since.as_ref().map(|bound| bound.stored.as_str()),
+            out,
+            json,
+            &archive_path,
+            &data_dir,
+        ),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
         Commands::Forget { chats, yes, json } => {
             forget::run(&chats, yes, json, &archive_path, &data_dir, &semantic_dir)
@@ -143,8 +150,8 @@ pub(crate) fn run(
             json,
         } => run_messages(
             &chat,
-            since.as_deref(),
-            until.as_deref(),
+            since.as_ref(),
+            until.as_ref(),
             limit,
             me.as_deref(),
             json,
@@ -759,21 +766,28 @@ fn run_source(command: SourceCommand, config: &KatokConfig, data_dir: &Path) -> 
 
 fn run_messages(
     chat: &str,
-    since: Option<&str>,
-    until: Option<&str>,
+    since: Option<&TimeBound>,
+    until: Option<&TimeBound>,
     limit: usize,
     me: Option<&str>,
     json: bool,
     archive_path: &Path,
 ) -> Result<()> {
     let archive = Archive::open(archive_path).context("open archive")?;
+    // SQL gets the stored form; the output echoes what the caller passed, as it always has.
     let messages = archive
-        .messages_for_chat_range(chat, since, until, limit, me)
+        .messages_for_chat_range(
+            chat,
+            since.map(|bound| bound.stored.as_str()),
+            until.map(|bound| bound.stored.as_str()),
+            limit,
+            me,
+        )
         .context("list messages")?;
     let payload = serde_json::json!({
         "chat_id": chat,
-        "since": since,
-        "until": until,
+        "since": since.map(|bound| bound.raw.as_str()),
+        "until": until.map(|bound| bound.raw.as_str()),
         "limit": limit,
         "count": messages.len(),
         "messages": messages,

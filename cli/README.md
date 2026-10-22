@@ -331,7 +331,7 @@ katok chunk get <chunk-id> --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
 katok transcript --chat <chat-id> --json
-katok transcript --chat <chat-id> --since 2026-07-20T00:00:00+09:00 --json
+katok transcript --chat <chat-id> --since 2026-07-19T15:00:00Z --json
 katok media get --chat <chat-id> --no-cdn --json
 katok wipe-index --yes --json
 katok forget --chat <chat-id> --json
@@ -339,6 +339,8 @@ katok forget --chat <chat-id> --yes --json
 katok send --chat <chat-id> --dry-run --json
 katok send --chat <chat-id> --text "메시지" --accept-use-policy --json
 ```
+
+`transcript`와 `messages`의 `--since`·`--until`은 RFC3339 시각을 받습니다. 오프셋은 `Z`, `+09:00` 어느 것이든 되고, 같은 순간이면 같은 행을 고릅니다. 아카이브는 시각을 UTC `+00:00` 꼴로 저장하므로 katok이 비교 전에 그 꼴로 바꿉니다. 날짜만 주면(`2026-07-20`) 그날 00:00:00 UTC입니다. `--until`에 날짜만 주면 그날의 시작까지만 들어갑니다. 그 밖의 값은 종료 코드 2의 인자 오류입니다.
 
 `katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
 
@@ -380,6 +382,8 @@ katok doctor --macos-probe --json
 ## 앱에 사이드카로 넣을 때
 
 `katok`을 다른 앱이 번들해 부를 때 쓰는 출력입니다. `--json` 출력은 필드를 더하기만 하고 기존 필드를 지우거나 뜻을 바꾸지 않습니다. `tests/fixtures/json-keys/`의 골든 파일이 Enter Message가 의존하는 키 계약이고, `tests/json_contract.rs`가 키가 빠지면 실패합니다(새 키는 `UPDATE_GOLDEN=1 cargo test --test json_contract`로 골든을 갱신해 함께 커밋합니다). 방 단위 sync는 `sync --chat`, 방 삭제는 `forget`(위 설명)을 씁니다.
+
+`katok messages --chat <chat-id> --since <시각> --json`에 앞서 받은 메시지의 `timestamp`를 그대로 넘기면 그 메시지부터 나옵니다. `--since`는 그 시각을 포함하고, `Z` 꼴로 바꿔 넘겨도 같습니다. 출력의 `since`·`until`은 넘긴 문자열을 그대로 돌려줍니다.
 
 `katok messages --chat <chat-id> --json`의 각 메시지에는 멘션 세 필드가 붙습니다.
 

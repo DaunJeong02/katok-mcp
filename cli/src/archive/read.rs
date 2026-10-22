@@ -287,10 +287,13 @@ impl Archive {
         Ok(None)
     }
 
-    /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
+    /// Messages of one chat in send order, optionally from `since` onward.
     ///
-    /// Timestamps are stored as RFC3339 text, which sorts and compares lexicographically in the
-    /// same order as the instants it encodes, so the range filter needs no conversion.
+    /// Timestamps are stored as `DateTime<Utc>::to_rfc3339()` text, always with a `+00:00`
+    /// offset, and the filter compares them as strings. That orders by instant only against a
+    /// bound in the same form: a `Z` bound sorts after the stored row at its own instant, and a
+    /// `+09:00` bound is nine hours off. `since` must therefore already be in the stored form;
+    /// the CLI converts `--since` to it before calling.
     pub fn messages_for_transcript(
         &self,
         chat_id: &str,
@@ -315,6 +318,9 @@ impl Archive {
     }
 
     /// Messages of one chat inside `[since, until]`, newest `limit` rows, returned oldest first.
+    ///
+    /// `since` and `until` are compared as strings, so they must be in the stored
+    /// `DateTime<Utc>::to_rfc3339()` form, as for [`Archive::messages_for_transcript`].
     ///
     /// Added on the talk2build branch for the mirror viewer and the poll cursor. `me_override`
     /// forces the user id that counts as the account owner for `is_mine` and `mentions_me`
