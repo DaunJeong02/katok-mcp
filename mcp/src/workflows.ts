@@ -4,16 +4,23 @@
  *
  *  - initialize: the katok_init flow (Keychain key, data directory, first sync, doctor).
  *  - runSyncPlan: katok_sync, optionally followed by a media backfill.
+ *
+ * Both record a failed sync in <data_dir>/last-sync-error.json (see failureLog.ts).
  */
 
 import { existsSync, mkdirSync } from "node:fs";
 import { ARCHIVE_KEY_ENV, keychainTarget } from "./archiveKey.js";
 import { doctorArgs, globalArgs, type PlanStep, syncArgs } from "./args.js";
+import { createFailureWriter, type FailureWriter, failureRecord } from "./failureLog.js";
+import { initTimeoutHint } from "./hints.js";
 import {
   BACKFILL_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
+  HintedError,
+  KatokError,
   LONG_TIMEOUT_MS,
   resetArchiveKey,
+  resolveBin,
   runKatok,
   withNote,
 } from "./katok.js";
@@ -41,6 +48,10 @@ export interface InitDeps {
   makeDir: (dir: string) => void;
   run: Runner;
   resetKey: () => void;
+  recordFailure: FailureWriter;
+  /** The katok binary path for the terminal fallback in a timeout note, or null if unknown. */
+  binPath: () => string | null;
+  now: () => Date;
 }
 
 export interface InitResult {
@@ -52,7 +63,11 @@ export interface InitResult {
     account?: string;
   };
   data_dir: string;
-  /** True when the archive already existed, in which case the first sync was skipped. */
+  /**
+   * True when an earlier katok_init already finished: the archive exists and doctor reports a
+   * completed sync with messages. Then nothing is synced. An archive left by an interrupted
+   * first sync (e.g. a timeout) is not initialized, and the sync runs again.
+   */
   already_initialized: boolean;
   sync: unknown | null;
   doctor: unknown;
@@ -70,7 +85,47 @@ export function defaultInitDeps(env: Env = process.env): InitDeps {
     },
     run: (args, options) => runKatok([...globalArgs(env), ...args], options),
     resetKey: resetArchiveKey,
+    recordFailure: createFailureWriter(dataDir(env)),
+    binPath: () => {
+      try {
+        return resolveBin(env);
+      } catch {
+        return null;
+      }
+    },
+    now: () => new Date(),
   };
+}
+
+/** True when katok doctor reports a completed sync that stored at least one message. */
+export function syncCompleted(doctor: unknown): boolean {
+  const last = (doctor as { freshness?: { last_sync?: { total_messages?: unknown } | null } })
+    ?.freshness?.last_sync;
+  return typeof last?.total_messages === "number" && last.total_messages > 0;
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@=-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The first sync, typed into a terminal: no MCP timeout there. The key comes from where the
+ * server gets it (the Keychain lookup command, or the caller's own KATOK_ARCHIVE_KEY), so the
+ * terminal run opens the same encrypted archive. The key value itself is never part of it.
+ */
+export function terminalSyncCommand(input: {
+  bin: string | null;
+  dataDir: string;
+  keychain: { service: string; account: string } | null;
+}): string {
+  const katok = `${shellQuote(input.bin ?? "katok")} --data-dir ${shellQuote(input.dataDir)} sync --source macos`;
+  if (input.keychain === null) return katok;
+  const lookup = `/usr/bin/security find-generic-password -s ${shellQuote(input.keychain.service)} -a ${shellQuote(input.keychain.account)} -w`;
+  return `KATOK_ARCHIVE_KEY="$(${lookup})" ${katok}`;
+}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof KatokError && error.detail.signal !== null;
 }
 
 /**
@@ -143,19 +198,46 @@ export async function initialize(deps: InitDeps): Promise<InitResult> {
 
   deps.makeDir(dir);
 
+  // An archive alone does not mean the first sync finished: a timeout leaves a partial one.
+  const before = archiveExisted
+    ? await deps.run(doctorArgs({}), { timeoutMs: DEFAULT_TIMEOUT_MS })
+    : null;
+  if (before !== null && syncCompleted(before)) {
+    return { key, data_dir: dir, already_initialized: true, sync: null, doctor: before };
+  }
+
   let sync: unknown | null = null;
-  if (!archiveExisted) {
-    try {
-      sync = await deps.run(syncArgs({}), { timeoutMs: LONG_TIMEOUT_MS });
-    } catch (error) {
-      throw withNote(
-        error,
-        `${key.created ? "아카이브 키는 이미 키체인에 저장됐습니다. " : ""}macOS 권한(Full Disk Access)을 확인한 뒤 katok_sync를 실행하거나 katok_init을 다시 실행하세요`,
+  try {
+    sync = await deps.run(syncArgs({}), { timeoutMs: LONG_TIMEOUT_MS });
+  } catch (error) {
+    deps.recordFailure("sync", failureRecord("katok_init", error, deps.now()));
+    const stored = "아카이브 키는 이미 키체인에 저장됐습니다";
+    if (isTimeout(error)) {
+      // One transaction: nothing was kept, so neither narrowing nor katok_sync helps here.
+      const command = terminalSyncCommand({
+        bin: deps.binPath(),
+        dataDir: dir,
+        keychain:
+          key.service !== undefined && key.account !== undefined
+            ? { service: key.service, account: key.account }
+            : null,
+      });
+      throw new HintedError(
+        key.created ? withNote(error, stored) : error,
+        initTimeoutHint({
+          command,
+          limitSeconds: LONG_TIMEOUT_MS / 1000,
+          envKey: key.source === "env",
+        }),
       );
     }
+    throw withNote(
+      error,
+      `${key.created ? `${stored}. ` : ""}macOS 권한(Full Disk Access)을 확인한 뒤 katok_sync를 실행하거나 katok_init을 다시 실행하세요. katok_init은 첫 동기화가 끝나지 않은 아카이브면 동기화를 다시 합니다`,
+    );
   }
   const doctor = await deps.run(doctorArgs({}), { timeoutMs: DEFAULT_TIMEOUT_MS });
-  return { key, data_dir: dir, already_initialized: archiveExisted, sync, doctor };
+  return { key, data_dir: dir, already_initialized: false, sync, doctor };
 }
 
 export interface SyncOutcome {
@@ -166,8 +248,13 @@ export interface SyncOutcome {
 /**
  * Run the planned steps in order and stop at the first failure. When a later step fails, the
  * error says that the earlier ones already succeeded, so the caller repeats only the failed one.
+ * `onFailure` sees the failed step and the original error before it is rethrown.
  */
-export async function runSyncPlan(steps: PlanStep[], run: Runner): Promise<SyncOutcome> {
+export async function runSyncPlan(
+  steps: PlanStep[],
+  run: Runner,
+  onFailure: (step: PlanStep["name"], error: unknown) => void = () => {},
+): Promise<SyncOutcome> {
   const data: { sync: unknown; backfill?: unknown } = { sync: null };
   let outDir: string | undefined;
   const done: string[] = [];
@@ -178,6 +265,7 @@ export async function runSyncPlan(steps: PlanStep[], run: Runner): Promise<SyncO
       if (step.name === "sync") data.sync = result;
       else data.backfill = result;
     } catch (error) {
+      onFailure(step.name, error);
       if (done.length === 0) throw error;
       throw withNote(
         error,

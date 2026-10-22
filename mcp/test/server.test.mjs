@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -27,6 +28,7 @@ mkdirSync(dataDir);
 writeFileSync(path.join(dataDir, "archive.sqlite3"), "x");
 writeFileSync(logFile, "");
 // argv after --data-dir <dir>: "$3" is the subcommand. `send` fails like a timeout would.
+// `index` prints katok's documents[] shape (synthetic entries); `search` records its argv.
 writeFileSync(
   fakeBin,
   `#!/bin/bash
@@ -34,6 +36,8 @@ echo "start $3" >> "${logFile}"
 sleep 0.4
 echo "end $3" >> "${logFile}"
 if [ "$3" = "send" ]; then echo "boom" >&2; exit 1; fi
+if [ "$3" = "index" ]; then echo '{"written_documents":2,"documents":[{"id":"d1"},{"id":"d2"}]}'; exit 0; fi
+if [ "$3" = "search" ]; then echo "argv \${*:3}" >> "${logFile}"; fi
 echo '{"ok":true}'
 `,
 );
@@ -135,6 +139,60 @@ describe("katok-mcp server (fake katok)", () => {
     assert.deepEqual(lines(), []);
   });
 
+  it("publishes the 0.3.0 inputs and wrapper fields in the tool schemas", async () => {
+    const { tools } = await client.listTools();
+    const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+    const since = byName.katok_messages.inputSchema.properties.since;
+    assert.match(since.description, /2026-07-20T00:00:00Z/);
+    assert.ok(!since.description.includes("+09:00"));
+    assert.equal(typeof since.pattern, "string");
+    assert.equal(byName.katok_sync.inputSchema.properties.chat_id.type, "array");
+    assert.equal(byName.katok_sync.inputSchema.properties.chat_id.items.type, "string");
+    assert.deepEqual(byName.katok_search.inputSchema.properties.order.enum, ["newest", "oldest"]);
+    assert.equal(byName.katok_index.inputSchema.properties.verbose.type, "boolean");
+    assert.ok(byName.katok_doctor.outputSchema.properties.warning);
+    assert.ok(byName.katok_doctor.outputSchema.properties.binary_build);
+  });
+
+  it("katok_index returns document_count instead of documents[] unless verbose", async () => {
+    const short = await client.callTool({ name: "katok_index", arguments: {} });
+    assert.notEqual(short.isError, true, textOf(short));
+    assert.deepEqual(short.structuredContent.data, { written_documents: 2, document_count: 2 });
+    const full = await client.callTool({ name: "katok_index", arguments: { verbose: true } });
+    assert.deepEqual(full.structuredContent.data.documents, [{ id: "d1" }, { id: "d2" }]);
+  });
+
+  it("katok_doctor reports binary_build beside data, with no warning for a non-repo binary", async () => {
+    const result = await client.callTool({ name: "katok_doctor", arguments: {} });
+    assert.notEqual(result.isError, true, textOf(result));
+    assert.deepEqual(result.structuredContent.data, { ok: true });
+    assert.equal(result.structuredContent.binary_build.path, fakeBin);
+    assert.equal(result.structuredContent.binary_build.ref, null);
+    assert.equal(typeof result.structuredContent.binary_build.mtime, "string");
+    assert.equal(result.structuredContent.warning, undefined);
+  });
+
+  it("keyword search passes --order newest; bm25 does not", async () => {
+    writeFileSync(logFile, "");
+    await client.callTool({ name: "katok_search", arguments: { mode: "keyword", query: "q" } });
+    await client.callTool({ name: "katok_search", arguments: { mode: "bm25", query: "q" } });
+    const argv = lines().filter((line) => line.startsWith("argv "));
+    assert.deepEqual(argv, [
+      "argv search keyword --order newest --json -- q",
+      "argv search bm25 --json -- q",
+    ]);
+  });
+
+  it("refuses a since without an offset before katok starts", async () => {
+    writeFileSync(logFile, "");
+    const result = await client.callTool({
+      name: "katok_messages",
+      arguments: { chat_id: "1", since: "2026-07-20T00:00:00" },
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(lines(), []);
+  });
+
   it("accepts an out_dir inside the data dir", async () => {
     const out = path.join(dataDir, "exports");
     const result = await client.callTool({
@@ -169,6 +227,56 @@ describe("katok-mcp server with sending enabled (fake katok that fails)", () => 
     } finally {
       await client.close();
     }
+  });
+});
+
+describe("katok-mcp server keeps the last sync/index failure (fake katok that fails)", () => {
+  it("writes last-sync-error.json and last-index-error.json without stdout or argv", async () => {
+    const failDir = path.join(tmp, "fail-data");
+    mkdirSync(failDir);
+    writeFileSync(path.join(failDir, "archive.sqlite3"), "x");
+    const failBin = path.join(tmp, "katok-fail");
+    writeFileSync(
+      failBin,
+      `#!/bin/bash
+echo "synthetic stderr" >&2
+echo '{"ok":false,"error":{"code":"synthetic_failure","message":"synthetic stdout body"}}'
+exit 1
+`,
+    );
+    chmodSync(failBin, 0o755);
+    const client = await connect({
+      KATOK_BIN: failBin,
+      KATOK_MCP_DATA_DIR: failDir,
+      KATOK_ARCHIVE_KEY: "test-key-not-a-secret",
+    });
+    try {
+      const sync = await client.callTool({
+        name: "katok_sync",
+        arguments: { chat_id: ["11", "22"] },
+      });
+      assert.equal(sync.isError, true);
+      const index = await client.callTool({ name: "katok_index", arguments: {} });
+      assert.equal(index.isError, true);
+    } finally {
+      await client.close();
+    }
+    for (const [file, tool] of [
+      ["last-sync-error.json", "katok_sync"],
+      ["last-index-error.json", "katok_index"],
+    ]) {
+      assert.equal(statSync(path.join(failDir, file)).mode & 0o777, 0o600, file);
+      const text = readFileSync(path.join(failDir, file), "utf8");
+      const record = JSON.parse(text);
+      assert.equal(record.tool, tool, file);
+      assert.equal(record.exitCode, 1, file);
+      assert.equal(record.errorCode, "synthetic_failure", file);
+      assert.equal(record.stderrHead, "synthetic stderr", file);
+      assert.ok(!text.includes("synthetic stdout body"), file);
+      assert.ok(!text.includes("test-key-not-a-secret"), file);
+      assert.ok(!text.includes("--data-dir"), file);
+    }
+    assert.equal(JSON.parse(readFileSync(path.join(failDir, "last-sync-error.json"))).step, "sync");
   });
 });
 

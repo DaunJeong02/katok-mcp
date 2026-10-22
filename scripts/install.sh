@@ -27,6 +27,11 @@ done
 echo "==> cargo build --release (cli/)"
 (cd "$ROOT/cli" && cargo build --release)
 test -x "$ROOT/cli/target/release/katok"
+# Build stamp: the commit this binary was built from. katok_doctor reports it and warns when the
+# stamp is missing or the binary is older than cli/src (e.g. a branch switch without a rebuild).
+BUILD_REF="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+printf '%s\n' "$BUILD_REF" >"$ROOT/cli/target/release/katok.ref"
+echo "    build stamp: $BUILD_REF"
 
 echo "==> pnpm install + build (mcp/)"
 (cd "$ROOT/mcp" && pnpm install --frozen-lockfile && pnpm build)

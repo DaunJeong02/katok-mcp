@@ -36,7 +36,8 @@
       last-backfill.json (media backfill) and last-index.json (index). The folder is made 0700
       and the files 0600. A failing step prints its error envelope on stdout too, so the
       failure is in that file. All three files are deleted at the start of a run, so a missing file means that step did not run
-      or did not finish (the log says why).
+      or did not finish (the log says why). last-sync-error.json and last-index-error.json in the
+      same folder are written by the MCP server, not by this job, and this job never deletes them.
     - stderr goes to the log below, plus one "failed" line with the exit code and time when the
       job stops. The log is never rotated; truncate it now and then.
 -->
@@ -65,7 +66,7 @@ BIN="__REPO__/cli/target/release/katok"
 DATA="${KATOK_MCP_DATA_DIR:?KATOK_MCP_DATA_DIR is not set}"
 SERVICE="${KATOK_MCP_KEYCHAIN_SERVICE:?}"
 ACCOUNT="${KATOK_MCP_KEYCHAIN_ACCOUNT:?}"
-trap 'echo "katok-mcp sync failed (exit $?) at $(date -u +%FT%TZ); see the log and $DATA/last-*.json" &gt;&amp;2' ERR
+trap 'echo "katok-mcp sync failed (exit $?) at $(date -u +%FT%TZ); see the log and $DATA/last-sync.json, last-backfill.json, last-index.json" &gt;&amp;2' ERR
 mkdir -p "$DATA"
 chmod 700 "$DATA"
 rm -f "$DATA/last-sync.json" "$DATA/last-backfill.json" "$DATA/last-index.json"

@@ -47,6 +47,20 @@ export class KatokError extends Error {
   }
 }
 
+/**
+ * An error that carries its own next-step hint. The tool error shows that hint instead of the
+ * generic rules in hints.ts (katok_init's first-sync timeout must not be told to narrow).
+ */
+export class HintedError extends Error {
+  constructor(
+    readonly inner: unknown,
+    readonly hint: string,
+  ) {
+    super(inner instanceof Error ? inner.message : String(inner));
+    this.name = "HintedError";
+  }
+}
+
 /** The same error with one more sentence appended to its message; the detail is kept. */
 export function withNote(error: unknown, note: string): unknown {
   if (error instanceof KatokError) {
@@ -74,6 +88,31 @@ export function resolveBin(env: NodeJS.ProcessEnv = process.env): string {
     );
   }
   return found;
+}
+
+/**
+ * Flags this server started passing after older katok builds. clap rejects an unknown flag with
+ * "unexpected argument '--x' found": on stdout inside the JSON envelope when --json is parsed by
+ * a current build, on stderr from builds older than that envelope.
+ */
+const RECENT_FLAGS = ["--order", "--chat"] as const;
+const UNEXPECTED_FLAG = /unexpected argument '(--[a-z-]+)'/;
+
+/** The recent flag an outdated katok rejected, or null. */
+export function outdatedFlag(text: string): string | null {
+  const flag = UNEXPECTED_FLAG.exec(text)?.[1];
+  return flag !== undefined && (RECENT_FLAGS as readonly string[]).includes(flag) ? flag : null;
+}
+
+/** Rewrites clap's "unexpected argument" for a recent flag into "rebuild katok". */
+export function markOutdated(error: unknown): unknown {
+  if (!(error instanceof KatokError)) return error;
+  const flag = outdatedFlag(`${error.message}\n${error.detail.stderr}\n${error.detail.stdoutHead}`);
+  if (flag === null) return error;
+  return new KatokError(
+    `katok binary is outdated: it does not accept ${flag}, which this server passes. If it is this repository's build (cli/target/release/katok), re-run scripts/install.sh from the repository root. A binary from KATOK_BIN or ~/.cargo/bin is not rebuilt by install.sh: update it where it came from`,
+    error.detail,
+  );
 }
 
 function isFailureEnvelope(value: unknown): value is { ok: false; error?: unknown } {
@@ -126,7 +165,7 @@ export async function runKatok(args: string[], options: RunOptions = {}): Promis
   try {
     return await execKatok(args, withArchiveKey(baseEnv, resolution), options);
   } catch (error) {
-    throw addKeyHint(error, resolution);
+    throw addKeyHint(markOutdated(error), resolution);
   }
 }
 

@@ -81,7 +81,10 @@ claude mcp get katok-mcp
 
 - 키체인에 `com.enternext.katok-mcp` / `archive-key` 항목이 없으면 `openssl rand -hex 32`로 키를 만들어 저장합니다. 키 값은 결과와 로그에 나오지 않습니다.
 - 데이터 폴더를 만들고 `katok sync --source macos --json`을 한 번 실행한 뒤 `doctor` 결과를 돌려줍니다.
-- 아카이브가 이미 있으면 동기화하지 않고 `doctor` 결과만 돌려줍니다.
+- 아카이브가 있고 `doctor`가 메시지가 1건 이상인 완료된 동기화를 보고하면 동기화하지 않고 `doctor` 결과만 돌려줍니다. 이때 `already_initialized`가 `true`입니다.
+- 아카이브가 있어도 첫 동기화가 끝나지 않았으면 다시 동기화합니다.
+- 첫 동기화는 한 트랜잭션입니다. 600초 제한에 걸리면 읽은 내용이 남지 않고, 다시 실행해도 처음부터 읽습니다. 그때는 에러에 나오는 터미널 명령을 직접 실행합니다. 이 명령은 시간 제한이 없고 키체인에서 키를 읽습니다. 키 값은 화면에 나오지 않습니다.
+- `katok_init`만 다시 실행하는 것은 권한 팝업 대기처럼 한 번만 생긴 지연이었을 때만 도움이 됩니다.
 
 첫 실행에 macOS가 TCC("다른 앱의 데이터에 접근") 팝업이나 키체인 팝업을 띄울 수 있습니다. 키체인 팝업에서는 **항상 허용**을 누르십시오.
 
@@ -89,15 +92,20 @@ claude mcp get katok-mcp
 
 모든 도구는 `{ ok, data, out_dir? }`를 텍스트와 `structuredContent`로 돌려줍니다. `data`는 katok의 JSON 그대로입니다. 실패는 `isError: true`와 다음 행동을 담은 문장입니다.
 
+예외는 두 가지입니다.
+
+- `katok_index`는 katok의 `documents[]` 대신 그 개수 `document_count`를 돌려줍니다. `verbose: true`일 때만 `documents[]`를 그대로 둡니다.
+- `katok_doctor`는 `data` 옆에 `binary_build`(`path`, `ref`, `mtime`)를 붙입니다. 저장소의 katok 바이너리에 빌드 기록이 없거나 소스보다 오래됐으면 `warning`도 붙입니다.
+
 | 도구 | 하는 일 | 읽기/쓰기 |
 |---|---|---|
 | `katok_init` | 키체인 키 생성, 첫 동기화, 상태 점검 | 쓰기 |
 | `katok_doctor` | 아카이브·인덱스 최신성과 권한 점검. `probe: true`일 때만 TCC 팝업이 뜰 수 있음 | 읽기 |
-| `katok_sync` | 카카오톡 DB의 새 메시지를 아카이브로 복사. `with_media`로 첨부 저장까지 실행 | 쓰기 |
+| `katok_sync` | 카카오톡 DB의 새 메시지를 아카이브로 복사. `chat_id`로 일부 방만, `with_media`로 첨부 저장까지 실행 | 쓰기 |
 | `katok_rooms` | 방 목록 | 읽기 |
 | `katok_messages` | 한 방의 메시지를 기간·개수로 조회 | 읽기 |
-| `katok_search` | `keyword`, `bm25`, `semantic` 검색 | 읽기 |
-| `katok_index` | semantic 검색용 벡터 인덱스 생성·갱신 | 쓰기 |
+| `katok_search` | `keyword`, `bm25`, `semantic` 검색. `keyword`는 최신순이 기본 | 읽기 |
+| `katok_index` | semantic 검색용 벡터 인덱스 생성·갱신. 결과는 `document_count`만 | 쓰기 |
 | `katok_chunk` | 검색 결과 chunk의 원문, 주변 chunk, parent window 조회 | 읽기 |
 | `katok_transcript` | 한 방의 대화를 Markdown 파일로 내보냄 | 쓰기 |
 | `katok_media_get` | 한 방의 사진·동영상·파일 저장 | 쓰기 |
@@ -108,6 +116,8 @@ claude mcp get katok-mcp
 총 13개입니다.
 
 타임아웃은 기본 120초입니다. `init`, `sync`, `index`는 600초, `media backfill`은 30분입니다.
+
+`katok_messages`와 `katok_transcript`의 `since`·`until`은 오프셋이 있는 RFC3339(`2026-07-20T00:00:00Z`)나 날짜(`2026-07-20`)만 받습니다. 날짜는 UTC 00:00:00입니다. 오프셋이 없는 시각은 katok을 띄우기 전에 거부합니다. `katok_transcript`에는 `until`이 없습니다.
 
 동시 호출은 한 서버 프로세스 안에서 두 줄로 직렬화합니다.
 
@@ -154,6 +164,7 @@ claude mcp add --scope user katok-mcp \
 - 먼저 `dry_run: true`로 규모를 확인하십시오. `tier_totals`의 `planned`는 CDN에서 받을 것, `stub`은 만료·없음, `existing`은 이미 저장됨, `full`/`thumb`은 로컬 캐시에서 복호화한 것입니다. `bytes`는 CDN 다운로드 총량입니다.
 - `dry_run`은 CDN 요청만 건너뜁니다. 사진·동영상 중 로컬 캐시에 있는 것은 dry run에서도 `out_dir`에 복호화해 씁니다. 파일만(`kind: ["file"]`) dry run 하면 아무것도 쓰지 않습니다.
 - `katok_sync`의 `with_media: true`는 동기화가 성공한 뒤 같은 backfill을 이어서 실행합니다. 결과는 `data.sync`와 `data.backfill`에 담기고, 저장 위치는 `out_dir`에 담깁니다.
+- `katok_sync`의 `chat_id: ["<id>", ...]`는 그 방만 동기화합니다(`--chat`을 방마다 붙임). katok은 그 방 묶음마다 증분 커서를 따로 둡니다. `chat_id` 없는 다음 동기화는 모든 방을 읽습니다. `with_media`는 `chat_id`와 관계없이 모든 방의 첨부를 받습니다.
 
 ### launchd로 30분마다 실행
 
@@ -201,6 +212,14 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.sy
 | 첨부 | `<데이터 폴더>/media/<chat_id>/` |
 | 트랜스크립트 | `<데이터 폴더>/transcripts/` |
 | 아카이브 키 | macOS 키체인 service `com.enternext.katok-mcp`, account `archive-key` |
+| 마지막 실패 기록 | `<데이터 폴더>/last-sync-error.json`, `last-index-error.json`. 아래 설명 참고 |
+| 빌드 기록 | `cli/target/release/katok.ref`. `scripts/install.sh`가 빌드한 커밋 |
+
+MCP 서버는 `katok_init`의 첫 동기화, `katok_sync`, `katok_index`가 실패하면 마지막 실패 기록을 씁니다.
+
+- 담는 것은 시각, 도구, 실패한 단계, 종료 코드, 시그널, katok 에러 코드, stderr 앞부분(2000자)입니다. katok의 stdout, 명령 인자, 키는 담지 않습니다. stderr 앞부분에는 katok의 진단 문구가 그대로 들어갑니다.
+- 파일 권한은 0600입니다. 나중에 성공해도 지우지 않습니다. 가장 최근 실패만 남깁니다.
+- launchd 작업이 쓰는 `last-sync.json`, `last-backfill.json`, `last-index.json`과는 별개입니다. 그 파일들은 작업이 매번 지우고 다시 씁니다.
 
 ### 키 처리
 
@@ -233,7 +252,7 @@ claude mcp add --scope user katok-mcp -e KATOK_MCP_OUT_ROOTS=~/Documents/katok-e
 
 | 변수 | 뜻 |
 |---|---|
-| `KATOK_BIN` | katok 실행 파일 경로. 없으면 `<repo>/cli/target/release/katok`, 그다음 `~/.cargo/bin/katok` |
+| `KATOK_BIN` | katok 실행 파일 경로. 없으면 `<repo>/cli/target/release/katok`, 그다음 `~/.cargo/bin/katok`. `scripts/install.sh`는 이 경로의 바이너리를 다시 빌드하지 않음 |
 | `KATOK_MCP_DATA_DIR` | 데이터 폴더 덮어쓰기 |
 | `KATOK_ARCHIVE_KEY` | 아카이브 키. 있으면 키체인보다 우선 |
 | `KATOK_MCP_KEYCHAIN` | `0`이면 키체인 조회를 끔 |
@@ -253,8 +272,11 @@ claude mcp add --scope user katok-mcp -e KATOK_MCP_OUT_ROOTS=~/Documents/katok-e
 | `semantic` | 로컬 EmbeddingGemma 벡터 | 표현이 정확히 기억나지 않는 질의 | `katok_index` 필요 |
 
 - `keyword`와 `bm25`는 `chat_id`로 방을 좁힐 수 있습니다. `semantic`은 좁힐 수 없습니다.
+- `keyword` 결과는 시간순입니다. 기본은 최신부터입니다(`order: "newest"`). `order: "oldest"`로 오래된 것부터 받습니다. `bm25`와 `semantic`은 점수순이라 `order`를 받지 않습니다.
+- `keyword`의 `%`, `_`, `\`는 와일드카드가 아니라 그 문자 그대로 찾습니다.
 - 첫 `katok_index`는 임베딩 모델을 내려받고 모든 window를 임베딩합니다. 아카이브가 크면 수십 분 이상 걸립니다. 이후는 바뀐 window만 임베딩하는 증분이라 짧습니다.
 - `katok_index`의 `full: true`는 모든 벡터를 새로 만듭니다.
+- `katok_index`는 기본으로 `documents[]` 대신 `document_count`를 돌려줍니다. katok의 `documents[]`는 수천 개, 수 MB가 될 수 있습니다. 목록이 필요하면 `verbose: true`를 씁니다.
 - 인덱스가 없거나 낡으면 `katok_search`의 `semantic` 모드가 거부하고 `katok_index`를 먼저 실행하라고 안내합니다.
 
 ## 문제 해결
@@ -263,6 +285,10 @@ claude mcp add --scope user katok-mcp -e KATOK_MCP_OUT_ROOTS=~/Documents/katok-e
 2. 권한 문제가 의심되면 사용자가 명시적으로 원할 때만 `probe: true`를 씁니다. TCC 팝업이 뜰 수 있습니다.
 3. 전체 디스크 접근 오류가 나면 Claude Code를 띄우는 앱을 시스템 설정에서 승인합니다. launchd 작업은 `/bin/bash`와 `katok` 바이너리를 별도로 승인합니다.
 4. 전송이나 창 목록이 실패하면 손쉬운 사용 권한을 확인합니다. `cli/target/release/katok permissions macos --accessibility`가 설정 화면을 엽니다.
+5. `katok_doctor` 결과에 `warning`이 있으면 저장소의 katok 바이너리가 소스보다 오래됐거나 빌드 기록이 없습니다. 저장소 루트에서 `scripts/install.sh`를 다시 실행합니다. 브랜치를 바꾼 뒤 다시 빌드하지 않으면 이 경고가 뜹니다.
+6. 도구가 `katok binary is outdated`로 실패하면 바이너리가 이 서버가 넘기는 플래그(`--order`, `--chat`)를 모릅니다. 5번과 같이 다시 빌드합니다.
+7. `KATOK_BIN`이나 `~/.cargo/bin`의 바이너리에는 `warning`을 붙이지 않습니다. `scripts/install.sh`는 그 바이너리를 다시 빌드하지 않습니다. 그 바이너리는 받아 온 곳에서 직접 갱신합니다.
+8. 지난 동기화·인덱스 실패는 `<데이터 폴더>/last-sync-error.json`, `last-index-error.json`에서 봅니다.
 
 katok이 돌려주는 에러 코드:
 

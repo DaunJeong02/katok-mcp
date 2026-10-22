@@ -3,7 +3,9 @@
  * katok-mcp: a thin stdio MCP server over the local katok KakaoTalk CLI (cli/ in this repo).
  *
  * Each tool maps to `katok ... --json` invocations and wraps katok's JSON in `{ ok, data, out_dir? }`
- * without interpreting it. katok_init and katok_sync (with_media) chain several invocations.
+ * without interpreting it, except katok_index, whose documents[] becomes document_count. katok_init
+ * and katok_sync (with_media) chain several invocations. katok_doctor adds binary_build (and a
+ * warning when the in-repo binary is older than its source) beside data.
  * This process never opens the network, never reads KakaoTalk databases or key files, and
  * writes nothing to stdout except MCP protocol frames (diagnostics go to stderr).
  */
@@ -26,21 +28,27 @@ import {
   roomsArgs,
   searchArgs,
   syncPlan,
+  TIMESTAMP_PATTERN,
   transcriptArgs,
   transcriptOutDir,
 } from "./args.js";
-import { nextStepHint, sendFailureHint } from "./hints.js";
+import { inspectBinaryBuild } from "./buildStamp.js";
+import { createFailureWriter, failureRecord } from "./failureLog.js";
+import { sendFailureHint } from "./hints.js";
 import {
   BACKFILL_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
-  KatokError,
   LONG_TIMEOUT_MS,
+  resolveBin,
   runKatok,
 } from "./katok.js";
 import { createLock, type Lock } from "./lock.js";
+import { dataDir, REPO_ROOT } from "./paths.js";
+import { shrinkIndexResult } from "./results.js";
+import { fail, failFrom, ok } from "./toolResult.js";
 import { defaultInitDeps, initialize, runSyncPlan } from "./workflows.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 /** Every tool answers `{ ok, data, out_dir? }`; data is katok's JSON, uninterpreted. */
 const outputSchema = {
@@ -52,31 +60,30 @@ const outputSchema = {
     .describe("Absolute directory on this Mac where files written by the call were saved"),
 };
 
-function ok(data: unknown, outDir?: string): CallToolResult {
-  const body = outDir === undefined ? { ok: true, data } : { ok: true, data, out_dir: outDir };
-  return {
-    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
-    structuredContent: body,
-  };
-}
+/** katok_doctor's wrapper also reports the binary build, and warns about a stale one. */
+const doctorOutputSchema = {
+  ...outputSchema,
+  warning: z
+    .string()
+    .optional()
+    .describe("Present when the in-repo katok binary looks older than its source; tell the user"),
+  binary_build: z
+    .object({
+      path: z.string().describe("The katok binary this server runs"),
+      ref: z.string().nullable().describe("Commit stamped by scripts/install.sh, or null"),
+      mtime: z.string().nullable().describe("Binary modification time (ISO 8601), or null"),
+    })
+    .optional(),
+};
 
-/**
- * A tool error. `hintOverride` replaces the generic next-step hint (katok_send must never be
- * told to narrow or repeat the call).
- */
-function fail(message: string, detail?: unknown, hintOverride?: string): CallToolResult {
-  const hint =
-    hintOverride ??
-    nextStepHint(`${message}\n${detail === undefined ? "" : JSON.stringify(detail)}`);
-  const head = hint === null ? message : `${message}\n\n${hint}`;
-  const text = detail === undefined ? head : `${head}\n\n${JSON.stringify(detail, null, 2)}`;
-  return { isError: true, content: [{ type: "text", text }] };
-}
-
-function failFrom(error: unknown, hintOverride?: string): CallToolResult {
-  if (error instanceof KatokError) return fail(error.message, error.detail, hintOverride);
-  return fail(error instanceof Error ? error.message : String(error), undefined, hintOverride);
-}
+const indexOutputSchema = {
+  ...outputSchema,
+  data: z
+    .unknown()
+    .describe(
+      "katok index JSON. documents[] is replaced by document_count (its length) unless verbose is true",
+    ),
+};
 
 /**
  * Two process-wide locks. Tools that drive the KakaoTalk UI share one; tools that write the
@@ -97,7 +104,15 @@ interface Prepared {
  */
 async function callPrepared(
   prepare: () => Prepared,
-  options: { timeoutMs?: number; lock?: Lock; failureHint?: string } = {},
+  options: {
+    timeoutMs?: number;
+    lock?: Lock;
+    failureHint?: string;
+    /** Reshapes katok's JSON before it is wrapped. */
+    shape?: (data: unknown) => unknown;
+    /** Sees every failure (including prepare's) before it becomes a tool error. */
+    onError?: (error: unknown) => void;
+  } = {},
 ): Promise<CallToolResult> {
   const run = async (): Promise<CallToolResult> => {
     try {
@@ -106,8 +121,9 @@ async function callPrepared(
         timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         ...(prepared.stdin === undefined ? {} : { stdin: prepared.stdin }),
       });
-      return ok(data, prepared.outDir);
+      return ok(options.shape ? options.shape(data) : data, prepared.outDir);
     } catch (error) {
+      options.onError?.(error);
       return failFrom(error, options.failureHint);
     }
   };
@@ -117,12 +133,25 @@ async function callPrepared(
 /** callPrepared for the common case: argv only. */
 function call(
   buildArgs: () => string[],
-  options: { timeoutMs?: number; lock?: Lock } = {},
+  options: Parameters<typeof callPrepared>[1] = {},
 ): Promise<CallToolResult> {
   return callPrepared(() => ({ args: buildArgs() }), options);
 }
 
-const rfc3339 = z.string().min(1).describe("RFC3339 timestamp, e.g. 2026-07-20T00:00:00+09:00");
+/** Writes <data_dir>/last-<kind>-error.json; the data dir is resolved per call like globalArgs. */
+function recordFailure(kind: "sync" | "index", tool: string, error: unknown, step?: string): void {
+  createFailureWriter(dataDir(process.env))(kind, failureRecord(tool, error, new Date(), step));
+}
+
+const rfc3339 = z
+  .string()
+  .min(1)
+  .regex(TIMESTAMP_PATTERN, {
+    message: "Use RFC3339 with an offset (2026-07-20T00:00:00Z) or a date (2026-07-20)",
+  })
+  .describe(
+    "RFC3339 timestamp with offset, e.g. 2026-07-20T00:00:00Z, or a date YYYY-MM-DD (00:00:00 UTC)",
+  );
 const chatId = z.string().min(1).describe("chat_id as reported by katok_rooms or a search hit");
 const limit = z.number().int().positive().max(100_000);
 
@@ -155,7 +184,8 @@ server.registerTool(
       "One-time setup of the dedicated katok-mcp archive (default data dir ~/Library/Application Support/katok-mcp, or KATOK_MCP_DATA_DIR).",
       "If neither KATOK_ARCHIVE_KEY nor the Keychain item (service com.enternext.katok-mcp, account archive-key) holds a key, generates a random one with `openssl rand -hex 32` and stores it in the macOS Keychain; the key value is never returned or logged.",
       "Then creates the data directory, runs `katok sync --source macos --json` once and returns `katok doctor --json`.",
-      "Already initialized (archive exists)? It only returns doctor and syncs nothing.",
+      "Already initialized (archive exists and doctor reports a completed sync with messages)? It only returns doctor and syncs nothing. An archive whose first sync never completed is synced again on a re-run.",
+      "The first sync is one transaction: a timeout keeps nothing, and a re-run reads everything again. After a timeout, give the user the terminal command from the error (no MCP time limit, key read from the Keychain); re-running katok_init only helps when the delay was one-off, such as a pending permission prompt.",
       "Requires Full Disk Access for the process that launched this server (Terminal / Claude Code). The first run can raise macOS prompts (TCC 'access data from other apps', Keychain access): ask the user to allow them, choosing 'Always Allow' for Keychain.",
       "Refuses to create a new key when an archive already exists without a Keychain key, because that would orphan or silently re-encrypt it. The first sync can take minutes (600 s timeout).",
     ].join(" "),
@@ -178,17 +208,30 @@ server.registerTool(
   {
     title: "katok doctor",
     description:
-      "Run `katok doctor --json`: archive and index freshness, including freshness.recommendation (sync_before_search, index_before_semantic_search). Never triggers macOS permission prompts unless probe is true. probe: true adds --macos-probe, which may raise a macOS 'access data from other apps' (TCC) prompt — only set it when the user explicitly asks for a permission diagnostic.",
+      "Run `katok doctor --json`: archive and index freshness, including freshness.recommendation (sync_before_search, index_before_semantic_search). Never triggers macOS permission prompts unless probe is true. probe: true adds --macos-probe, which may raise a macOS 'access data from other apps' (TCC) prompt — only set it when the user explicitly asks for a permission diagnostic. Beside data, binary_build reports the katok binary (path, the commit scripts/install.sh stamped, mtime); warning appears when the in-repo binary has no stamp or is older than cli/src, and means: re-run scripts/install.sh.",
     inputSchema: {
       probe: z
         .boolean()
         .optional()
         .describe("Add --macos-probe. May raise a macOS TCC prompt. Default false."),
     },
-    outputSchema,
+    outputSchema: doctorOutputSchema,
     annotations: READ_ONLY,
   },
-  async ({ probe }) => call(() => doctorArgs({ probe })),
+  async ({ probe }) => {
+    try {
+      const data = await runKatok([...globalArgs(process.env), ...doctorArgs({ probe })]);
+      let build: ReturnType<typeof inspectBinaryBuild> | null = null;
+      try {
+        build = inspectBinaryBuild(resolveBin(process.env), REPO_ROOT);
+      } catch {
+        // Reporting the build is best effort: doctor itself already succeeded.
+      }
+      return ok(data, undefined, build ?? {});
+    } catch (error) {
+      return failFrom(error);
+    }
+  },
 );
 
 server.registerTool(
@@ -198,13 +241,23 @@ server.registerTool(
     description: [
       "Run `katok sync --source macos --json`: copy new messages from the live macOS KakaoTalk database into the local katok archive. Requires Full Disk Access for the process that launches this server (terminal / Claude Code). Writes only to the local archive; may take minutes on the first run (600 s timeout). Run katok_init first on a fresh setup.",
       "Result data is { sync, backfill? }.",
-      "with_media: true then runs `katok media backfill` (all kinds, output <data_dir>/media) after a successful sync and returns both results plus out_dir. This reaches the Kakao CDN (the only network access) and can download a lot; use katok_media_backfill with dry_run first when the size is unknown.",
+      "chat_id: [ids] syncs only those rooms (repeated --chat); katok keeps a separate incremental cursor for that exact set, so a later sync without chat_id still reads every room.",
+      "with_media: true then runs `katok media backfill` (all kinds, every room even with chat_id, output <data_dir>/media) after a successful sync and returns both results plus out_dir. This reaches the Kakao CDN (the only network access) and can download a lot; use katok_media_backfill with dry_run first when the size is unknown.",
+      "A failure is also kept in <data_dir>/last-sync-error.json (time, exit status, katok error code, stderr head; never message content).",
     ].join(" "),
     inputSchema: {
       incremental: z
         .boolean()
         .optional()
         .describe("Add --incremental: read only rows added since the last sync."),
+      chat_id: z
+        .array(chatId)
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(
+          "Sync only these chat_ids (strings, as reported by katok_rooms). Default: every room.",
+        ),
       with_media: z
         .boolean()
         .optional()
@@ -219,8 +272,10 @@ server.registerTool(
     try {
       const steps = syncPlan(input, process.env);
       const outcome = await writeLock(() =>
-        runSyncPlan(steps, (args, options) =>
-          runKatok([...globalArgs(process.env), ...args], options),
+        runSyncPlan(
+          steps,
+          (args, options) => runKatok([...globalArgs(process.env), ...args], options),
+          (step, error) => recordFailure("sync", "katok_sync", error, step),
         ),
       );
       return ok(outcome.data, outcome.out_dir);
@@ -251,8 +306,16 @@ server.registerTool(
       "Run `katok messages --chat <id> [--since] [--until] [--limit] --json`: the newest `limit` archived messages of one chat inside the optional RFC3339 range, ordered oldest first, with sender identity.",
     inputSchema: {
       chat_id: chatId,
-      since: rfc3339.optional().describe("Only messages at or after this RFC3339 timestamp"),
-      until: rfc3339.optional().describe("Only messages at or before this RFC3339 timestamp"),
+      since: rfc3339
+        .optional()
+        .describe(
+          "Only messages at or after this time: RFC3339 with offset, e.g. 2026-07-20T00:00:00Z, or YYYY-MM-DD (00:00:00 UTC)",
+        ),
+      until: rfc3339
+        .optional()
+        .describe(
+          "Only messages at or before this time: RFC3339 with offset, e.g. 2026-07-20T00:00:00Z, or YYYY-MM-DD (00:00:00 UTC)",
+        ),
       limit: limit
         .optional()
         .describe("Max rows from the newest end of the range (katok default 500)"),
@@ -275,12 +338,16 @@ server.registerTool(
   {
     title: "katok search",
     description:
-      "Run `katok search <keyword|bm25|semantic> <query> [--limit N] --json`. Returns a global top-k across rooms (default 10) with chunk_id, chat_id, chat_name, sender_nickname, started_at and a short snippet. keyword = exact substring, bm25 = ranked FTS, semantic = local EmbeddingGemma vectors. Semantic search first checks katok doctor and refuses when the index is missing or stale (run katok_index). chat_id filtering works for keyword and bm25 only.",
+      "Run `katok search <keyword|bm25|semantic> <query> [--limit N] --json`. Returns a global top-k across rooms (default 10) with chunk_id, chat_id, chat_name, sender_nickname, started_at and a short snippet. keyword = exact substring, newest hits first (--order newest; order: oldest reverses), bm25 = ranked FTS, semantic = local EmbeddingGemma vectors. Semantic search first checks katok doctor and refuses when the index is missing or stale (run katok_index). chat_id filtering works for keyword and bm25 only.",
     inputSchema: {
       mode: z.enum(["keyword", "bm25", "semantic"]),
       query: z.string().min(1),
       limit: limit.optional().describe("Number of hits (katok default 10)"),
       chat_id: chatId.optional().describe("Restrict hits to one chat_id (keyword/bm25 only)"),
+      order: z
+        .enum(["newest", "oldest"])
+        .optional()
+        .describe("keyword only: hit order by time (default newest). bm25/semantic rank by score"),
     },
     outputSchema,
     annotations: READ_ONLY,
@@ -310,15 +377,25 @@ server.registerTool(
   {
     title: "katok index",
     description:
-      "Run `katok index [--full] --json`: build or refresh the local EmbeddingGemma vector index used by semantic search. The first run downloads the embedding model into the local cache; can take minutes (600 s timeout). Writes only to the local katok data directory.",
+      "Run `katok index [--full] --json`: build or refresh the local EmbeddingGemma vector index used by semantic search. The first run downloads the embedding model into the local cache; can take minutes (600 s timeout). Writes only to the local katok data directory. katok lists every indexed window in documents[] (thousands of entries); this tool returns document_count instead unless verbose is true. A failure is also kept in <data_dir>/last-index-error.json.",
     inputSchema: {
       full: z.boolean().optional().describe("Add --full: rebuild every vector"),
       dry_run: z.boolean().optional().describe("Add --dry-run"),
+      verbose: z
+        .boolean()
+        .optional()
+        .describe("Keep katok's full documents[] list (can be megabytes). Default false"),
     },
-    outputSchema,
+    outputSchema: indexOutputSchema,
     annotations: NETWORK_WRITE,
   },
-  async (input) => call(() => indexArgs(input), { timeoutMs: LONG_TIMEOUT_MS, lock: writeLock }),
+  async ({ verbose, ...input }) =>
+    call(() => indexArgs(input), {
+      timeoutMs: LONG_TIMEOUT_MS,
+      lock: writeLock,
+      shape: (data) => shrinkIndexResult(data, verbose === true),
+      onError: (error) => recordFailure("index", "katok_index", error),
+    }),
 );
 
 server.registerTool(

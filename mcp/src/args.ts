@@ -28,12 +28,22 @@ export function doctorArgs(input: { probe?: boolean }): string[] {
   return args;
 }
 
-export function syncArgs(input: { incremental?: boolean }): string[] {
+export function syncArgs(input: { incremental?: boolean; chat_id?: readonly string[] }): string[] {
   const args = ["sync", "--source", "macos"];
   if (input.incremental === true) args.push("--incremental");
+  // katok keeps a separate --incremental cursor per exact set of --chat ids.
+  for (const id of input.chat_id ?? []) args.push("--chat", id);
   args.push("--json");
   return args;
 }
+
+/**
+ * Accepted --since/--until values: an RFC3339 timestamp with an explicit offset (Z or ±HH:MM)
+ * or a plain YYYY-MM-DD date. katok does the full validation; this only rejects obvious typos
+ * before a process starts.
+ */
+export const TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}(?:[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2}))?$/;
 
 export type MediaKind = "photo" | "video" | "file";
 export const ALL_MEDIA_KINDS: readonly MediaKind[] = ["file", "photo", "video"];
@@ -70,6 +80,7 @@ export function mediaBackfillPlan(
 
 export interface SyncInput {
   incremental?: boolean;
+  chat_id?: readonly string[];
   with_media?: boolean;
 }
 
@@ -81,7 +92,10 @@ export interface PlanStep {
 
 /** The ordered katok invocations behind one katok_sync call: sync first, then backfill. */
 export function syncPlan(input: SyncInput, env: Env): PlanStep[] {
-  const steps: PlanStep[] = [{ name: "sync", args: syncArgs({ incremental: input.incremental }) }];
+  const steps: PlanStep[] = [
+    { name: "sync", args: syncArgs({ incremental: input.incremental, chat_id: input.chat_id }) },
+  ];
+  // The backfill still covers every room: chat_id narrows only what is read from KakaoTalk.
   if (input.with_media === true) {
     const backfill = mediaBackfillPlan({}, env);
     steps.push({ name: "backfill", args: backfill.args, out_dir: backfill.out_dir });
@@ -108,12 +122,14 @@ export function messagesArgs(input: {
 }
 
 export type SearchMode = "keyword" | "bm25" | "semantic";
+export type SearchOrder = "newest" | "oldest";
 
 export function searchArgs(input: {
   mode: SearchMode;
   query: string;
   limit?: number;
   chat_id?: string;
+  order?: SearchOrder;
 }): string[] {
   const args = ["search", input.mode];
   if (input.limit !== undefined) args.push("--limit", String(input.limit));
@@ -122,6 +138,13 @@ export function searchArgs(input: {
       throw new Error("chat_id filter is only supported for keyword and bm25 search");
     }
     args.push("--chat", input.chat_id);
+  }
+  // Keyword hits are substring matches with no relevance score, so their order is time: newest
+  // first unless asked otherwise. bm25 and semantic rank by score and take no --order.
+  if (input.mode === "keyword") {
+    args.push("--order", input.order ?? "newest");
+  } else if (input.order !== undefined) {
+    throw new Error("order is only supported for keyword search; bm25 and semantic rank by score");
   }
   // `--` keeps a query that starts with "-" from being parsed as a flag.
   args.push("--json", "--", input.query);

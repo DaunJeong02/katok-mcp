@@ -16,6 +16,8 @@ import {
   roomsArgs,
   searchArgs,
   syncArgs,
+  syncPlan,
+  TIMESTAMP_PATTERN,
   transcriptArgs,
 } from "../dist/args.js";
 import { defaultDataDir } from "../dist/paths.js";
@@ -292,5 +294,106 @@ describe("send gate: KATOK_MCP_ALLOWED_CHATS", () => {
 
   it("does not restrict dry_run", () => {
     assert.equal(planSend({ chat_id: "30" }, env).ok, true);
+  });
+});
+
+describe("keyword search order", () => {
+  it("keyword passes --order newest by default, before -- and the query", () => {
+    assert.deepEqual(searchArgs({ mode: "keyword", query: "q" }), [
+      "search",
+      "keyword",
+      "--order",
+      "newest",
+      "--json",
+      "--",
+      "q",
+    ]);
+  });
+
+  it("keyword passes order oldest when asked", () => {
+    const args = searchArgs({
+      mode: "keyword",
+      query: "q",
+      limit: 2,
+      chat_id: "7",
+      order: "oldest",
+    });
+    assert.deepEqual(args, [
+      "search",
+      "keyword",
+      "--limit",
+      "2",
+      "--chat",
+      "7",
+      "--order",
+      "oldest",
+      "--json",
+      "--",
+      "q",
+    ]);
+  });
+
+  it("bm25 and semantic never get --order, and refuse an explicit order", () => {
+    assert.ok(!searchArgs({ mode: "bm25", query: "q" }).includes("--order"));
+    assert.ok(!searchArgs({ mode: "semantic", query: "q" }).includes("--order"));
+    assert.throws(() => searchArgs({ mode: "bm25", query: "q", order: "newest" }), /keyword/);
+    assert.throws(() => searchArgs({ mode: "semantic", query: "q", order: "oldest" }), /keyword/);
+  });
+});
+
+describe("sync chat_id", () => {
+  it("repeats --chat per id and keeps --incremental as before", () => {
+    assert.deepEqual(syncArgs({ chat_id: ["11", "22"] }), [
+      "sync",
+      "--source",
+      "macos",
+      "--chat",
+      "11",
+      "--chat",
+      "22",
+      "--json",
+    ]);
+    assert.deepEqual(syncArgs({ incremental: true, chat_id: ["11"] }), [
+      "sync",
+      "--source",
+      "macos",
+      "--incremental",
+      "--chat",
+      "11",
+      "--json",
+    ]);
+    assert.deepEqual(syncArgs({ chat_id: [] }), ["sync", "--source", "macos", "--json"]);
+  });
+
+  it("syncPlan narrows only the sync step; the backfill still covers every room", () => {
+    const steps = syncPlan({ chat_id: ["11"], with_media: true }, { KATOK_MCP_DATA_DIR: "/d" });
+    assert.deepEqual(steps[0].args, ["sync", "--source", "macos", "--chat", "11", "--json"]);
+    assert.ok(!steps[1].args.includes("--chat"));
+  });
+});
+
+describe("since/until format", () => {
+  it("accepts RFC3339 with an offset and a plain date", () => {
+    for (const value of [
+      "2026-07-20T00:00:00Z",
+      "2026-07-20T00:00:00+09:00",
+      "2026-07-20T00:00:00.123-05:30",
+      "2026-07-20",
+    ]) {
+      assert.ok(TIMESTAMP_PATTERN.test(value), value);
+    }
+  });
+
+  it("rejects a timestamp without an offset and other shapes", () => {
+    for (const value of [
+      "2026-07-20T00:00:00",
+      "2026-07-20 00:00",
+      "20260720",
+      "yesterday",
+      "1752969600000",
+      "2026-07-20T00:00Z",
+    ]) {
+      assert.ok(!TIMESTAMP_PATTERN.test(value), value);
+    }
   });
 });
