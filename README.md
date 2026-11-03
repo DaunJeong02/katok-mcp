@@ -30,10 +30,11 @@ Claude Code · Codex 에서 **맥 카카오톡 대화를 로컬로** 읽고 검�
 **1. 빌드·등록**
 
 ```bash
+git clone https://github.com/DaunJeong02/katok-mcp.git && cd katok-mcp
 scripts/install.sh
 ```
 
-CLI·서버를 빌드하고, 설치된 도구에 등록합니다. 다시 실행해도 안전합니다.
+CLI·서버를 빌드하고, 설치된 Claude Code · Codex 에 모두 등록합니다. 다시 실행해도 안전합니다.
 
 Rust 가 없으면(또는 `KATOK_PREBUILT=1`) CLI 를 [Releases](https://github.com/DaunJeong02/katok-mcp/releases) 에서 받아 SHA-256 을 검증합니다. 이 바이너리는 Apple 서명이 없습니다(ad-hoc). `curl` 로 받으므로 Gatekeeper 격리가 붙지 않습니다.
 
@@ -124,7 +125,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.enternext.katok-mcp.
 ```
 
 `/bin/bash` 와 `cli/target/release/katok` 에 전체 디스크 접근을 따로 줍니다.
-재빌드하면 이 권한을 다시 승인합니다.
+재빌드하거나 새 Release 를 받아 바이너리가 바뀌면 이 권한을 다시 승인합니다.
 
 ## 업데이트
 
