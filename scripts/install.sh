@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build katok (cli/) and the MCP server (mcp/), then register the server with Claude Code and/or Codex.
+# Without cargo (or with KATOK_PREBUILT=1) katok is downloaded from GitHub Releases instead.
 #
 # Registers at user scope. A first install passes NO environment variables: the archive key lives
 # in the macOS Keychain (created by the katok_init tool), never in ~/.claude.json.
@@ -13,9 +14,40 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo not found. Install Rust (https://rustup.rs) first." >&2
-  exit 127
+BIN_DIR="$ROOT/cli/target/release"
+RELEASE_REPO="DaunJeong02/katok-mcp"
+ASSET="katok-aarch64-apple-darwin.tar.gz"
+
+# Prebuilt katok from GitHub Releases: unsigned (ad-hoc), Apple silicon only, checked against its
+# SHA-256. The release for this checkout's tag when HEAD is tagged, otherwise the latest one.
+download_katok() {
+  if [[ "$(uname -s)-$(uname -m)" != "Darwin-arm64" ]]; then
+    echo "Prebuilt katok is for Apple silicon Macs only. Install Rust (https://rustup.rs) to build from source." >&2
+    exit 127
+  fi
+  local tag base tmp
+  tag="$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true)"
+  if [[ -n "$tag" ]]; then
+    base="https://github.com/$RELEASE_REPO/releases/download/$tag"
+  else
+    base="https://github.com/$RELEASE_REPO/releases/latest/download"
+  fi
+  tmp="$(mktemp -d)"
+  echo "==> download katok ($base/$ASSET)"
+  curl -fsSL -o "$tmp/$ASSET" "$base/$ASSET"
+  curl -fsSL -o "$tmp/$ASSET.sha256" "$base/$ASSET.sha256"
+  (cd "$tmp" && shasum -a 256 -c "$ASSET.sha256")
+  mkdir -p "$BIN_DIR"
+  tar -xzf "$tmp/$ASSET" -C "$BIN_DIR" katok katok.ref
+  touch "$BIN_DIR/katok.ref"
+  rm -rf "$tmp"
+  echo "    build stamp: $(cat "$BIN_DIR/katok.ref")"
+}
+
+USE_PREBUILT="${KATOK_PREBUILT:-0}"
+if [[ "$USE_PREBUILT" != 1 ]] && ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo not found, using the prebuilt katok."
+  USE_PREBUILT=1
 fi
 for tool in node pnpm; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -28,14 +60,18 @@ if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; th
   exit 127
 fi
 
-echo "==> cargo build --release (cli/)"
-(cd "$ROOT/cli" && cargo build --release)
-test -x "$ROOT/cli/target/release/katok"
-# Build stamp: the commit this binary was built from. katok_doctor reports it and warns when the
-# stamp is missing or the binary is older than cli/src (e.g. a branch switch without a rebuild).
-BUILD_REF="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-printf '%s\n' "$BUILD_REF" >"$ROOT/cli/target/release/katok.ref"
-echo "    build stamp: $BUILD_REF"
+if [[ "$USE_PREBUILT" == 1 ]]; then
+  download_katok
+else
+  echo "==> cargo build --release (cli/)"
+  (cd "$ROOT/cli" && cargo build --release)
+  # Build stamp: the commit this binary was built from. katok_doctor reports it and warns when the
+  # stamp is missing or the binary is older than cli/src (e.g. a branch switch without a rebuild).
+  BUILD_REF="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  printf '%s\n' "$BUILD_REF" >"$BIN_DIR/katok.ref"
+  echo "    build stamp: $BUILD_REF"
+fi
+test -x "$BIN_DIR/katok"
 
 echo "==> pnpm install + build (mcp/)"
 (cd "$ROOT/mcp" && pnpm install --frozen-lockfile && pnpm build)

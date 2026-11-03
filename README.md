@@ -25,7 +25,7 @@ Claude Code · Codex 에서 **맥 카카오톡 대화를 로컬로** 읽고 검�
 
 ## 설치
 
-준비: Apple Silicon Mac, 로그인된 카카오톡, Rust 1.91, Node 22+, pnpm, Claude Code 또는 Codex
+준비: Apple Silicon Mac, 로그인된 카카오톡, Node 22+, pnpm, Claude Code 또는 Codex. Rust 1.91 은 소스 빌드할 때만 필요합니다.
 
 **1. 빌드·등록**
 
@@ -34,6 +34,8 @@ scripts/install.sh
 ```
 
 CLI·서버를 빌드하고, 설치된 도구에 등록합니다. 다시 실행해도 안전합니다.
+
+Rust 가 없으면(또는 `KATOK_PREBUILT=1`) CLI 를 [Releases](https://github.com/DaunJeong02/katok-mcp/releases) 에서 받아 SHA-256 을 검증합니다. 이 바이너리는 Apple 서명이 없습니다(ad-hoc). `curl` 로 받으므로 Gatekeeper 격리가 붙지 않습니다.
 
 - Claude Code: `claude mcp add --scope user katok-mcp`
 - Codex: `codex mcp add katok-mcp` + `tool_timeout_sec = 1800` (`~/.codex/config.toml`)

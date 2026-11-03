@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  katok-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build katok
+        working-directory: cli
+        run: cargo build --release --locked
+
+      - name: Package
+        env:
+          ASSET: katok-aarch64-apple-darwin.tar.gz
+        run: |
+          set -euo pipefail
+          BIN=cli/target/release
+          file "$BIN/katok" | grep -q arm64
+          codesign -dv "$BIN/katok" 2>&1 | grep -q adhoc
+          "$BIN/katok" --version
+          printf '%s\n' "$GITHUB_SHA" >"$BIN/katok.ref"
+          mkdir dist
+          tar -czf "dist/$ASSET" -C "$BIN" katok katok.ref
+          (cd dist && shasum -a 256 "$ASSET" >"$ASSET.sha256" && cat "$ASSET.sha256")
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Apple silicon (arm64) katok, unsigned (ad-hoc). Verify with \`shasum -a 256 -c katok-aarch64-apple-darwin.tar.gz.sha256\`. scripts/install.sh downloads and verifies it when cargo is missing."
