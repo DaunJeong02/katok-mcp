@@ -17,7 +17,7 @@ const RULES: readonly { test: RegExp; hint: string }[] = [
   },
   {
     test: /operation not permitted|permission denied|full disk access|EPERM|os error 1\b/i,
-    hint: "다음 행동: macOS 시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근 권한에서 이 서버를 띄우는 앱(Terminal, Claude Code 등)을 켠 뒤 앱을 다시 시작하고 재시도하세요. `katok permissions macos`가 설정 화면을 엽니다.",
+    hint: "다음 행동: macOS 시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근 권한에서 이 서버를 띄우는 앱(Terminal, Claude Code, Codex 등)을 켠 뒤 앱을 다시 시작하고 재시도하세요. `katok permissions macos`가 설정 화면을 엽니다.",
   },
   {
     test: /binary not found/i,

@@ -186,7 +186,7 @@ server.registerTool(
       "Then creates the data directory, runs `katok sync --source macos --json` once and returns `katok doctor --json`.",
       "Already initialized (archive exists and doctor reports a completed sync with messages)? It only returns doctor and syncs nothing. An archive whose first sync never completed is synced again on a re-run.",
       "The first sync is one transaction: a timeout keeps nothing, and a re-run reads everything again. After a timeout, give the user the terminal command from the error (no MCP time limit, key read from the Keychain); re-running katok_init only helps when the delay was one-off, such as a pending permission prompt.",
-      "Requires Full Disk Access for the process that launched this server (Terminal / Claude Code). The first run can raise macOS prompts (TCC 'access data from other apps', Keychain access): ask the user to allow them, choosing 'Always Allow' for Keychain.",
+      "Requires Full Disk Access for the process that launched this server (Terminal / Claude Code / Codex). The first run can raise macOS prompts (TCC 'access data from other apps', Keychain access): ask the user to allow them, choosing 'Always Allow' for Keychain.",
       "Refuses to create a new key when an archive already exists without a Keychain key, because that would orphan or silently re-encrypt it. The first sync can take minutes (600 s timeout).",
     ].join(" "),
     inputSchema: {},
@@ -239,7 +239,7 @@ server.registerTool(
   {
     title: "katok sync",
     description: [
-      "Run `katok sync --source macos --json`: copy new messages from the live macOS KakaoTalk database into the local katok archive. Requires Full Disk Access for the process that launches this server (terminal / Claude Code). Writes only to the local archive; may take minutes on the first run (600 s timeout). Run katok_init first on a fresh setup.",
+      "Run `katok sync --source macos --json`: copy new messages from the live macOS KakaoTalk database into the local katok archive. Requires Full Disk Access for the process that launches this server (terminal / Claude Code / Codex). Writes only to the local archive; may take minutes on the first run (600 s timeout). Run katok_init first on a fresh setup.",
       "Result data is { sync, backfill? }.",
       "chat_id: [ids] syncs only those rooms (repeated --chat); katok keeps a separate incremental cursor for that exact set, so a later sync without chat_id still reads every room.",
       "with_media: true then runs `katok media backfill` (all kinds, every room even with chat_id, output <data_dir>/media) after a successful sync and returns both results plus out_dir. This reaches the Kakao CDN (the only network access) and can download a lot; use katok_media_backfill with dry_run first when the size is unknown.",
